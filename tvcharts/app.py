@@ -13,9 +13,9 @@ import plotly.graph_objects as go
 from dash import ALL, Input, Output, State, ctx, dcc, html
 from plotly.subplots import make_subplots
 
-from . import strategy
 from .indicators import INDICATOR_REGISTRY
 from .providers import BinanceProvider, INTERVALS, ProviderError, get_provider
+from .strategies import STRATEGIES, get_strategy_params
 
 APP_NAME = "TradingView Local"
 
@@ -112,11 +112,80 @@ INDEX_STRING = """<!DOCTYPE html>
                 border: 1px solid #2a2e39 !important;
             }
             .wl-row:hover { background: #2a2e39; }
+            /* Drag handles between panels */
+            .splitter-v {
+                width: 5px; cursor: col-resize; background: #2a2e39;
+                flex: 0 0 5px;
+            }
+            .splitter-h {
+                height: 5px; cursor: row-resize; background: #2a2e39;
+                flex: 0 0 5px;
+            }
+            .splitter-v:hover, .splitter-h:hover { background: #2962ff; }
         </style>
     </head>
     <body>
         {%app_entry%}
         <footer>{%config%}{%scripts%}{%renderer%}</footer>
+        <script>
+        /* Drag-to-resize panels: sidebar width, right column width, and the
+           watchlist/strategy split. Panels are plain flex children, so
+           changing width/height reflows everything; a window resize event is
+           dispatched so the Plotly chart re-measures itself. */
+        (function () {
+            var lastResize = 0;
+            function pokeChart() {
+                var now = Date.now();
+                if (now - lastResize > 100) {
+                    lastResize = now;
+                    window.dispatchEvent(new Event("resize"));
+                }
+            }
+            function drag(handle, onMove) {
+                handle.addEventListener("mousedown", function (e) {
+                    e.preventDefault();
+                    function mm(ev) { onMove(ev); pokeChart(); }
+                    function mu() {
+                        document.removeEventListener("mousemove", mm);
+                        document.removeEventListener("mouseup", mu);
+                        window.dispatchEvent(new Event("resize"));
+                    }
+                    document.addEventListener("mousemove", mm);
+                    document.addEventListener("mouseup", mu);
+                });
+            }
+            function init() {
+                var sb = document.getElementById("sidebar"),
+                    rc = document.getElementById("right-column"),
+                    wl = document.getElementById("watchlist-panel"),
+                    sl = document.getElementById("split-left"),
+                    sr = document.getElementById("split-right"),
+                    ss = document.getElementById("split-strategy");
+                if (!sb || !rc || !wl || !sl || !sr || !ss) {
+                    setTimeout(init, 500);
+                    return;
+                }
+                drag(sl, function (e) {
+                    var w = Math.min(Math.max(e.clientX, 170), 600);
+                    sb.style.width = w + "px";
+                    sb.style.minWidth = w + "px";
+                });
+                drag(sr, function (e) {
+                    var w = Math.min(Math.max(window.innerWidth - e.clientX, 180), 800);
+                    rc.style.width = w + "px";
+                    rc.style.minWidth = w + "px";
+                });
+                drag(ss, function (e) {
+                    var r = rc.getBoundingClientRect();
+                    var h = Math.min(Math.max(e.clientY - r.top, 80), r.height - 80);
+                    wl.style.flex = "none";
+                    wl.style.height = h + "px";
+                });
+            }
+            if (document.readyState !== "loading") init();
+            else document.addEventListener("DOMContentLoaded", init);
+        })();
+        </script>
     </body>
 </html>"""
 
@@ -225,8 +294,24 @@ def build_layout() -> html.Div:
                                      "fontSize": "12px"}),
                  *(_param_inputs())],
             ),
+            html.Div(style={"height": "16px"}),
+            _control_label("Strategy"),
+            dcc.Dropdown(id="strategy-select",
+                         options=[{"label": v["label"], "value": k}
+                                  for k, v in STRATEGIES.items()],
+                         value="dcai", clearable=False,
+                         className="dark-dropdown"),
+            html.Details(
+                [html.Summary("Strategy settings",
+                              style={"cursor": "pointer", "margin": "12px 0 8px",
+                                     "color": WHITE, "fontWeight": "600",
+                                     "fontSize": "12px"}),
+                 html.Div(id="strategy-params")],
+                open=False,
+            ),
             dcc.Interval(id="refresh", interval=30_000, n_intervals=0),
         ],
+        id="sidebar",
         style={"width": "260px", "minWidth": "260px", "background": PANEL,
                "padding": "16px", "overflowY": "auto",
                "borderRight": f"1px solid {GRID}"},
@@ -275,6 +360,7 @@ def build_layout() -> html.Div:
             # v2 key: bumping the id resets browsers that stored the old default list
             dcc.Store(id="watchlist-v2", data=DEFAULT_WATCHLIST, storage_type="local"),
         ],
+        id="watchlist-panel",
         # Top three quarters of the right column, scrolls independently
         style={"flex": "3", "minHeight": "0", "overflowY": "auto",
                "padding": "12px"},
@@ -285,21 +371,29 @@ def build_layout() -> html.Div:
             html.Div("Strategy", style={"color": WHITE, "fontWeight": "700",
                                         "fontSize": "15px",
                                         "marginBottom": "8px"}),
-            html.Div(id="strategy-body"),
+            dcc.Loading(html.Div(id="strategy-body"), type="dot", color=ACCENT),
         ],
-        # Reserved bottom quarter: populated from tvcharts/strategy.py
+        id="strategy-box",
+        # Reserved bottom quarter: populated from tvcharts/strategies
         style={"flex": "1", "minHeight": "0", "overflowY": "auto",
-               "padding": "12px", "borderTop": f"2px solid {GRID}"},
+               "padding": "12px"},
     )
 
     right_column = html.Div(
-        [watchlist, strategy_box],
+        [watchlist,
+         html.Div(id="split-strategy", className="splitter-h"),
+         strategy_box],
+        id="right-column",
         style={"width": "290px", "minWidth": "290px", "background": PANEL,
                "borderLeft": f"1px solid {GRID}", "display": "flex",
                "flexDirection": "column", "height": "100vh"},
     )
 
-    return html.Div([sidebar, chart, right_column],
+    return html.Div([sidebar,
+                     html.Div(id="split-left", className="splitter-v"),
+                     chart,
+                     html.Div(id="split-right", className="splitter-v"),
+                     right_column],
                     style={"display": "flex", "height": "100vh", "margin": "0",
                            "background": BG, "color": TEXT,
                            "fontFamily": "'Trebuchet MS', Roboto, sans-serif"})
@@ -329,6 +423,74 @@ def _fmt_price(v: float) -> str:
     if v >= 1:
         return f"{v:,.2f}"
     return f"{v:.4f}"
+
+
+def _strategy_param_inputs(strategy_key: str) -> list:
+    """Sidebar inputs generated from the selected strategy's PARAMS spec."""
+    spec = get_strategy_params(strategy_key)
+    if not spec:
+        return [html.Div("This strategy has no settings.",
+                         style={"color": "#787b86", "fontSize": "12px"})]
+    rows = []
+    for name, cfg in spec.items():
+        pid = {"type": "sparam", "param": name}
+        kind = cfg.get("kind", "number")
+        if kind == "select":
+            control = dcc.Dropdown(id=pid, options=cfg["options"],
+                                   value=cfg["default"], clearable=False,
+                                   className="dark-dropdown",
+                                   style={"width": "100%"})
+            rows.append(html.Div(
+                [html.Span(cfg["label"], style={"fontSize": "12px",
+                                                "color": WHITE,
+                                                "fontWeight": "600"}),
+                 control],
+                style={"marginBottom": "8px"}))
+        elif kind == "bool":
+            rows.append(dcc.Checklist(
+                id=pid, options=[{"label": cfg["label"], "value": "on"}],
+                value=["on"] if cfg["default"] else [],
+                inputStyle={"marginRight": "8px"},
+                labelStyle={"color": WHITE, "fontWeight": "600",
+                            "fontSize": "12px"},
+                style={"marginBottom": "6px"}))
+        else:
+            rows.append(html.Div(
+                [html.Span(cfg["label"],
+                           style={"fontSize": "12px", "flex": "1",
+                                  "color": WHITE, "fontWeight": "600"}),
+                 dcc.Input(id=pid, type="number", value=cfg["default"],
+                           min=cfg.get("min"), max=cfg.get("max"),
+                           step=cfg.get("step", 1),
+                           style={"width": "80px", "background": BG,
+                                  "color": WHITE,
+                                  "border": f"1px solid {GRID}",
+                                  "borderRadius": "4px",
+                                  "padding": "2px 6px",
+                                  "fontWeight": "600"})],
+                style={"display": "flex", "alignItems": "center",
+                       "gap": "8px", "marginBottom": "6px"}))
+    return rows
+
+
+def _collect_strategy_params(strategy_key: str, param_ids, param_values) -> dict:
+    spec = get_strategy_params(strategy_key)
+    out = {}
+    for ident, value in zip(param_ids or [], param_values or []):
+        name = ident.get("param")
+        if name not in spec:
+            continue
+        cfg = spec[name]
+        if cfg.get("kind") == "bool":
+            out[name] = bool(value)  # checklist value: [] or ["on"]
+        elif value is None:
+            out[name] = cfg["default"]
+        else:
+            out[name] = value
+    # fill anything the UI didn't provide (e.g. before first render)
+    for name, cfg in spec.items():
+        out.setdefault(name, cfg["default"])
+    return out
 
 
 def _fetch_quote(provider_name: str, sym: str):
@@ -390,18 +552,23 @@ _STRAT_GRID = {"display": "grid", "gridTemplateColumns": "1.2fr 1fr 0.9fr",
                "gap": "4px", "alignItems": "center", "padding": "3px 6px"}
 
 
-def _strategy_rows(symbol: str, provider_name: str) -> list:
-    """Render rows from tvcharts.strategy.get_stats for the bottom-right box."""
+def _strategy_rows(strategy_key: str, symbol: str, provider_name: str,
+                   params: dict) -> list:
+    """Render rows from the selected strategy for the bottom-right box."""
+    module = STRATEGIES.get(strategy_key, {}).get("module")
+    if module is None:
+        return [html.Div("No strategy selected.",
+                         style={"color": "#787b86", "fontSize": "12px"})]
     df = None
-    try:
-        df = get_provider(provider_name).get_ohlcv(symbol, "1d", 300)
+    try:  # strategies run on daily bars with maximum available history
+        df = get_provider(provider_name).get_ohlcv(symbol, "1d", 1000)
     except ProviderError:
         try:
-            df = get_provider("sample").get_ohlcv(symbol, "1d", 300)
+            df = get_provider("sample").get_ohlcv(symbol, "1d", 1000)
         except ProviderError:
             df = None
     try:
-        stats = strategy.get_stats(symbol=symbol, df=df)
+        stats = module.get_stats(symbol=symbol, df=df, **params)
     except Exception as exc:  # a broken user strategy must not kill the UI
         return [html.Div(f"strategy error: {exc}",
                          style={"color": DOWN, "fontSize": "12px"})]
@@ -554,7 +721,7 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
     )
     fig.update_xaxes(
         gridcolor=GRID, showspikes=True, spikemode="across",
-        spikecolor="#787b86", spikethickness=1,
+        spikecolor="#787b86", spikethickness=1, spikedash="dot",
         # Zoom-adaptive labels: years when zoomed out, then month+year,
         # then week/day, down to intraday times.
         tickformatstops=[
@@ -567,7 +734,10 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
             dict(dtickrange=["M12", None], value="%Y"),
         ],
     )
-    fig.update_yaxes(gridcolor=GRID, side="right")
+    # Horizontal crosshair line, matching the vertical dotted spike
+    fig.update_yaxes(gridcolor=GRID, side="right", showspikes=True,
+                     spikemode="across", spikecolor="#787b86",
+                     spikethickness=1, spikedash="dot")
     return fig
 
 
@@ -633,15 +803,26 @@ def create_app() -> dash.Dash:
     def render_watchlist(symbols, provider_name, _tick):
         return _watchlist_rows(list(symbols or []), provider_name)
 
+    @app.callback(Output("strategy-params", "children"),
+                  Input("strategy-select", "value"))
+    def render_strategy_params(strategy_key):
+        return _strategy_param_inputs(strategy_key)
+
     @app.callback(Output("strategy-body", "children"),
+                  Input("strategy-select", "value"),
                   Input("symbol", "value"),
                   Input("provider", "value"),
-                  Input("refresh", "n_intervals"))
-    def render_strategy(symbol, provider_name, _tick):
+                  Input("refresh", "n_intervals"),
+                  Input({"type": "sparam", "param": ALL}, "value"),
+                  State({"type": "sparam", "param": ALL}, "id"))
+    def render_strategy(strategy_key, symbol, provider_name, _tick,
+                        sparam_values, sparam_ids):
         symbol = (symbol or "").strip().upper()
         if not symbol:
             return []
-        return _strategy_rows(symbol, provider_name)
+        params = _collect_strategy_params(strategy_key, sparam_ids,
+                                          sparam_values)
+        return _strategy_rows(strategy_key, symbol, provider_name, params)
 
     @app.callback(
         Output("chart", "figure"),

@@ -50,7 +50,11 @@ container it binds `0.0.0.0:8050` by default; change the published port with
 - **Symbol dropdown** with the top 100 pairs (live by 24h volume on Binance, curated lists elsewhere) — free typing still works for any symbol
 - **Watchlist panel** on the right: pin any pair, see Last / Chg / Chg% at a glance (auto-refreshing, fetched concurrently), click a row to load it on the chart; persists across restarts in the browser
 - **Volume pane toggle** (Panes → Volume) to hide/show the volume chart
-- **Strategy panel** (bottom-right quarter): implement `get_stats()` in `tvcharts/strategy.py` to display your own strategy's stats (label / value / status rows, colors supported) — see the docstring for an example
+- **Strategy panel** (bottom-right quarter) with a sidebar strategy selector:
+  - **DCAi (ML DCA)** — a Python port of [Cerebrux/DCAi](https://github.com/Cerebrux/DCAi): KNN pattern recognition (Lorentzian distance, walk-forward validated) with Ichimoku/MFI/CVD/kernel filters, three buy tiers (Pullback / Oversold / Fear), a Savings Pot, and a full dashboard vs a blind-DCA benchmark. All inputs (asset class, budget, Rho, KNN settings, boosts…) are adjustable under "Strategy settings". *Note: `tvcharts/strategies/dcai.py` is AGPL-3.0 (the original's license, vendored in `third_party/DCAi/`); the rest of this repo is MIT.*
+  - **Custom** — implement `get_stats()` in `tvcharts/strategy.py` to display your own stats (label / value / status rows, colors supported)
+- **Drag-to-resize panels**: grab the divider between sidebar/chart, chart/watchlist, or watchlist/strategy and drag
+- **Crosshair** with both vertical and horizontal dotted tracking lines
 - **Start date picker** to anchor the chart's history
 - **Overlay indicators** on the price pane:
   - Simple Moving Average (SMA)
@@ -175,7 +179,10 @@ tvcharts/
   app.py                # Dash layout, callbacks, figure builder
   indicators.py         # indicator math + registry
   providers.py          # Binance / Yahoo / Sample providers, TTL cache
-  strategy.py           # your strategy's stats for the bottom-right panel
+  strategy.py           # your custom strategy hook (MIT)
+  strategies/
+    dcai.py             # DCAi ML-DCA port (AGPL-3.0, © Salih Emin/Cerebrux)
+third_party/DCAi/       # original dcai.pine + AGPL-3.0 license text
 tests/
   test_indicators.py    # math verified against hand-computed values
   test_providers.py     # provider contract + cache tests (offline)
