@@ -1,0 +1,11 @@
+services:
+  tvcharts:
+    build: .
+    image: tvcharts:latest
+    container_name: tvcharts
+    ports:
+      - "8050:8050"
+    environment:
+      # Change the internal port if needed (also update the mapping above)
+      TVCHARTS_PORT: "8050"
+    restart: unless-stopped

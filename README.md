@@ -18,6 +18,29 @@ python run.py
 
 No API keys, no accounts, no configuration needed.
 
+### Run with Docker (works the same on any OS)
+
+```bash
+docker compose up --build
+# open http://127.0.0.1:8050 in your browser
+```
+
+Or without compose:
+
+```bash
+docker build -t tvcharts .
+docker run -p 8050:8050 tvcharts
+```
+
+The container runs as an unprivileged user, includes a healthcheck, and
+respects `TVCHARTS_HOST` / `TVCHARTS_PORT` environment variables (inside the
+container it binds `0.0.0.0:8050` by default; change the published port with
+`-p <host-port>:8050`).
+
+> Building behind a corporate TLS-intercepting proxy? Pass your proxy's CA to
+> pip, e.g. add `COPY ca.crt /ca.crt` and `ENV PIP_CERT=/ca.crt` after the
+> `WORKDIR` line, or build with `--network host` and proxy build args.
+
 ---
 
 ## Features
@@ -140,6 +163,8 @@ That's it — it appears in the sidebar automatically.
 ```
 run.py                  # entry point: python run.py [--host] [--port] [--debug]
 requirements.txt
+Dockerfile              # container image (python:3.12-slim, non-root, healthcheck)
+docker-compose.yml      # one-command run: docker compose up --build
 tvcharts/
   app.py                # Dash layout, callbacks, figure builder
   indicators.py         # indicator math + registry
