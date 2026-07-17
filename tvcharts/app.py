@@ -122,6 +122,13 @@ INDEX_STRING = """<!DOCTYPE html>
                 flex: 0 0 5px;
             }
             .splitter-v:hover, .splitter-h:hover { background: #2962ff; }
+            /* Drag strips between chart panes (price / volume / oscillators) */
+            .pane-divider {
+                position: absolute; cursor: row-resize; z-index: 20;
+            }
+            .pane-divider:hover, .pane-divider.dragging {
+                background: rgba(41, 98, 255, 0.35);
+            }
         </style>
     </head>
     <body>
@@ -184,6 +191,168 @@ INDEX_STRING = """<!DOCTYPE html>
             }
             if (document.readyState !== "loading") init();
             else document.addEventListener("DOMContentLoaded", init);
+        })();
+        </script>
+        <script>
+        /* Adjustable dividers between the chart's panes (price, volume,
+           oscillators). Overlay strips sit on the gaps between subplots and
+           drag the y-axis domains via Plotly.relayout — the figure itself is
+           untouched, so data, zoom and indicators survive. The chosen layout
+           is stored per pane-count in localStorage and re-applied after every
+           server-side figure update. */
+        (function () {
+            var GAP = 0.01;         // half of the visual gap between panes
+            var MIN_PANE = 0.05;    // no pane may shrink below 5% height
+            var applying = false;
+
+            function graphDiv() {
+                var wrap = document.getElementById("chart");
+                if (!wrap) { return null; }
+                var gd = wrap.classList.contains("js-plotly-plot")
+                    ? wrap : wrap.querySelector(".js-plotly-plot");
+                return gd && gd._fullLayout ? gd : null;
+            }
+            function paneAxes(gd) {
+                return Object.keys(gd._fullLayout)
+                    .filter(function (k) { return /^yaxis\d*$/.test(k); })
+                    .filter(function (k) {
+                        var ax = gd._fullLayout[k];
+                        return ax && ax.domain && ax.domain.length === 2;
+                    })
+                    .sort(function (a, b) {   // top pane first
+                        return gd._fullLayout[b].domain[1] -
+                               gd._fullLayout[a].domain[1];
+                    });
+            }
+            function storeKey(n) { return "tvcharts-panes-" + n; }
+
+            function saveDomains(gd, keys) {
+                var domains = keys.map(function (k) {
+                    return gd._fullLayout[k].domain.slice();
+                });
+                try {
+                    localStorage.setItem(storeKey(keys.length),
+                                         JSON.stringify(domains));
+                } catch (err) { /* private mode etc. */ }
+            }
+            function applySaved(gd) {
+                var keys = paneAxes(gd);
+                var raw = null;
+                try { raw = localStorage.getItem(storeKey(keys.length)); }
+                catch (err) { return; }
+                if (!raw) { return; }
+                var domains;
+                try { domains = JSON.parse(raw); } catch (err) { return; }
+                if (!domains || domains.length !== keys.length) { return; }
+                var update = {}, changed = false;
+                keys.forEach(function (k, i) {
+                    var cur = gd._fullLayout[k].domain;
+                    if (Math.abs(cur[0] - domains[i][0]) > 1e-6 ||
+                        Math.abs(cur[1] - domains[i][1]) > 1e-6) {
+                        changed = true;
+                    }
+                    update[k + ".domain"] = domains[i];
+                });
+                if (changed && window.Plotly) {
+                    applying = true;
+                    Plotly.relayout(gd, update).then(function () {
+                        applying = false;
+                    }, function () { applying = false; });
+                }
+            }
+
+            function buildDividers(gd) {
+                gd.querySelectorAll(".pane-divider").forEach(function (el) {
+                    el.remove();
+                });
+                var keys = paneAxes(gd);
+                if (keys.length < 2) { return; }
+                var size = gd._fullLayout._size;   // plot area in px
+                if (!size) { return; }
+                if (getComputedStyle(gd).position === "static") {
+                    gd.style.position = "relative";
+                }
+                for (var i = 0; i < keys.length - 1; i++) {
+                    (function (i) {
+                        var upper = keys[i], lower = keys[i + 1];
+                        var mid = (gd._fullLayout[upper].domain[0] +
+                                   gd._fullLayout[lower].domain[1]) / 2;
+                        var strip = document.createElement("div");
+                        strip.className = "pane-divider";
+                        strip.style.left = size.l + "px";
+                        strip.style.width = size.w + "px";
+                        strip.style.height = "9px";
+                        strip.style.top =
+                            (size.t + (1 - mid) * size.h - 4.5) + "px";
+                        strip.title = "Drag to resize panes";
+                        strip.addEventListener("mousedown", function (e) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            strip.classList.add("dragging");
+                            var rect = gd.getBoundingClientRect();
+                            var pending = null;
+                            function mm(ev) {
+                                var y = 1 - (ev.clientY - rect.top - size.t)
+                                            / size.h;
+                                var lo = gd._fullLayout[lower].domain[0]
+                                         + MIN_PANE;
+                                var hi = gd._fullLayout[upper].domain[1]
+                                         - MIN_PANE;
+                                y = Math.min(Math.max(y, lo), hi);
+                                var update = {};
+                                update[upper + ".domain"] =
+                                    [y + GAP, gd._fullLayout[upper].domain[1]];
+                                update[lower + ".domain"] =
+                                    [gd._fullLayout[lower].domain[0], y - GAP];
+                                if (!pending && window.Plotly) {
+                                    pending = requestAnimationFrame(function () {
+                                        pending = null;
+                                        applying = true;
+                                        Plotly.relayout(gd, update)
+                                            .then(function () {
+                                                applying = false;
+                                            }, function () {
+                                                applying = false;
+                                            });
+                                    });
+                                }
+                            }
+                            function mu() {
+                                document.removeEventListener("mousemove", mm);
+                                document.removeEventListener("mouseup", mu);
+                                strip.classList.remove("dragging");
+                                saveDomains(gd, paneAxes(gd));
+                                buildDividers(gd);
+                            }
+                            document.addEventListener("mousemove", mm);
+                            document.addEventListener("mouseup", mu);
+                        });
+                        gd.appendChild(strip);
+                    })(i);
+                }
+            }
+
+            function hook() {
+                var gd = graphDiv();
+                if (!gd || !gd.on) { setTimeout(hook, 600); return; }
+                if (gd.__paneDividersHooked) { return; }
+                gd.__paneDividersHooked = true;
+                gd.on("plotly_afterplot", function () {
+                    if (applying) { return; }
+                    applySaved(gd);
+                    buildDividers(gd);
+                });
+                gd.on("plotly_relayout", function () {
+                    if (!applying) { buildDividers(gd); }
+                });
+                applySaved(gd);
+                buildDividers(gd);
+                window.addEventListener("resize", function () {
+                    setTimeout(function () { buildDividers(gd); }, 150);
+                });
+            }
+            if (document.readyState !== "loading") hook();
+            else document.addEventListener("DOMContentLoaded", hook);
         })();
         </script>
     </body>
@@ -710,6 +879,9 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
 
     fig.update_layout(
         template="plotly_dark",
+        # Keep user zoom/pan across auto-refresh; resets when the chart's
+        # identity (symbol, pane structure) actually changes.
+        uirevision=f"{symbol}|{len(pane_inds)}|{show_volume}",
         paper_bgcolor=BG, plot_bgcolor=BG,
         font=dict(color=TEXT, size=12),
         margin=dict(l=8, r=8, t=8, b=8),

@@ -54,6 +54,8 @@ container it binds `0.0.0.0:8050` by default; change the published port with
   - **DCAi (ML DCA)** — a Python port of [Cerebrux/DCAi](https://github.com/Cerebrux/DCAi): KNN pattern recognition (Lorentzian distance, walk-forward validated) with Ichimoku/MFI/CVD/kernel filters, three buy tiers (Pullback / Oversold / Fear), a Savings Pot, and a full dashboard vs a blind-DCA benchmark. All inputs (asset class, budget, Rho, KNN settings, boosts…) are adjustable under "Strategy settings". *Note: `tvcharts/strategies/dcai.py` is AGPL-3.0 (the original's license, vendored in `third_party/DCAi/`); the rest of this repo is MIT.*
   - **Custom** — implement `get_stats()` in `tvcharts/strategy.py` to display your own stats (label / value / status rows, colors supported)
 - **Drag-to-resize panels**: grab the divider between sidebar/chart, chart/watchlist, or watchlist/strategy and drag
+- **Drag-to-resize chart panes**: drag the strip between the price, volume and oscillator panes to change their heights; the layout persists across refreshes (per pane count, in the browser)
+- **Zoom survives auto-refresh**: pan/zoom state is kept across the 30s data refresh and only resets when the symbol or pane structure changes
 - **Crosshair** with both vertical and horizontal dotted tracking lines
 - **Start date picker** to anchor the chart's history
 - **Overlay indicators** on the price pane:
