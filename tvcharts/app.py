@@ -355,6 +355,67 @@ INDEX_STRING = """<!DOCTYPE html>
             else document.addEventListener("DOMContentLoaded", hook);
         })();
         </script>
+        <script>
+        /* Fixed hover readout: fills #ohlc-bar with the hovered bar's OHLC and
+           indicator values, TradingView-style, so no floating box covers the
+           chart around the cursor. Traces carry hoverinfo:"none", which hides
+           Plotly's labels but still fires hover events. */
+        (function () {
+            function fmt(v) {
+                if (v === null || v === undefined || isNaN(v)) { return "—"; }
+                var a = Math.abs(v);
+                var d = a >= 1000 ? 1 : a >= 1 ? 2 : 5;
+                return v.toLocaleString(undefined,
+                                        {maximumFractionDigits: d});
+            }
+            var SEP = '<span style="color:#2a2e39"> | </span>';
+            function hook() {
+                var bar = document.getElementById("ohlc-bar");
+                var wrap = document.getElementById("chart");
+                var gd = wrap && (wrap.classList.contains("js-plotly-plot")
+                                  ? wrap
+                                  : wrap.querySelector(".js-plotly-plot"));
+                if (!bar || !gd || !gd.on) { setTimeout(hook, 600); return; }
+                if (gd.__ohlcHooked) { return; }
+                gd.__ohlcHooked = true;
+                gd.on("plotly_hover", function (ev) {
+                    if (!ev || !ev.points || !ev.points.length) { return; }
+                    var parts = [];
+                    var x = String(ev.points[0].x);
+                    parts.push('<span style="color:#787b86">'
+                               + x.slice(0, 16) + "</span>");
+                    ev.points.forEach(function (pt) {
+                        var tr = pt.data;
+                        if (tr.type === "candlestick") {
+                            var i = pt.pointNumber !== undefined
+                                ? pt.pointNumber : pt.pointIndex;
+                            var o = pt.open !== undefined ? pt.open : tr.open[i],
+                                h = pt.high !== undefined ? pt.high : tr.high[i],
+                                l = pt.low !== undefined ? pt.low : tr.low[i],
+                                c = pt.close !== undefined ? pt.close
+                                                           : tr.close[i];
+                            var col = c >= o ? "#26a69a" : "#ef5350";
+                            parts.push('<span style="color:' + col + '">O '
+                                + fmt(o) + "&nbsp; H " + fmt(h) + "&nbsp; L "
+                                + fmt(l) + "&nbsp; C " + fmt(c) + "</span>");
+                        } else if (tr.type === "bar") {
+                            parts.push('<span style="color:#787b86">'
+                                + (tr.name || "") + " " + fmt(pt.y)
+                                + "</span>");
+                        } else {
+                            var lc = (tr.line && tr.line.color) || "#d1d4dc";
+                            parts.push('<span style="color:' + lc + '">'
+                                + (tr.name || "") + " " + fmt(pt.y)
+                                + "</span>");
+                        }
+                    });
+                    bar.innerHTML = parts.join(SEP);
+                });
+            }
+            if (document.readyState !== "loading") hook();
+            else document.addEventListener("DOMContentLoaded", hook);
+        })();
+        </script>
     </body>
 </html>"""
 
@@ -490,8 +551,16 @@ def build_layout() -> html.Div:
         [
             html.Div(id="status", style={"color": DOWN, "padding": "4px 12px",
                                          "fontSize": "13px", "minHeight": "22px"}),
+            # Fixed hover readout (TradingView-style): OHLC + indicator values
+            # of the hovered bar render here instead of a floating box that
+            # would cover the chart.
+            html.Div(id="ohlc-bar",
+                     style={"padding": "0 12px 4px", "fontSize": "13px",
+                            "minHeight": "20px", "fontWeight": "600",
+                            "whiteSpace": "nowrap", "overflow": "hidden",
+                            "textOverflow": "ellipsis"}),
             dcc.Loading(
-                dcc.Graph(id="chart", style={"height": "calc(100vh - 40px)"},
+                dcc.Graph(id="chart", style={"height": "calc(100vh - 62px)"},
                           config={"scrollZoom": True, "displaylogo": False}),
                 type="dot", color=ACCENT,
             ),
@@ -721,6 +790,32 @@ _STRAT_GRID = {"display": "grid", "gridTemplateColumns": "1.2fr 1fr 0.9fr",
                "gap": "4px", "alignItems": "center", "padding": "3px 6px"}
 
 
+def _strategy_df(symbol: str, provider_name: str):
+    """Daily bars with maximum history — the frame all strategies run on."""
+    try:
+        return get_provider(provider_name).get_ohlcv(symbol, "1d", 1000)
+    except ProviderError:
+        try:
+            return get_provider("sample").get_ohlcv(symbol, "1d", 1000)
+        except ProviderError:
+            return None
+
+
+def _strategy_signals(strategy_key: str, symbol: str, provider_name: str,
+                      params: dict) -> list[dict]:
+    """Buy flags for the price chart, if the strategy provides them."""
+    module = STRATEGIES.get(strategy_key, {}).get("module")
+    if module is None or not hasattr(module, "get_signals"):
+        return []
+    df = _strategy_df(symbol, provider_name)
+    if df is None:
+        return []
+    try:
+        return module.get_signals(symbol=symbol, df=df, **params)
+    except Exception:
+        return []
+
+
 def _strategy_rows(strategy_key: str, symbol: str, provider_name: str,
                    params: dict) -> list:
     """Render rows from the selected strategy for the bottom-right box."""
@@ -728,14 +823,7 @@ def _strategy_rows(strategy_key: str, symbol: str, provider_name: str,
     if module is None:
         return [html.Div("No strategy selected.",
                          style={"color": "#787b86", "fontSize": "12px"})]
-    df = None
-    try:  # strategies run on daily bars with maximum available history
-        df = get_provider(provider_name).get_ohlcv(symbol, "1d", 1000)
-    except ProviderError:
-        try:
-            df = get_provider("sample").get_ohlcv(symbol, "1d", 1000)
-        except ProviderError:
-            df = None
+    df = _strategy_df(symbol, provider_name)
     try:
         stats = module.get_stats(symbol=symbol, df=df, **params)
     except Exception as exc:  # a broken user strategy must not kill the UI
@@ -770,7 +858,8 @@ def _strategy_rows(strategy_key: str, symbol: str, provider_name: str,
 
 
 def build_figure(df, symbol: str, active: list[str], params: dict,
-                 show_volume: bool = True) -> go.Figure:
+                 show_volume: bool = True,
+                 signals: list[dict] | None = None) -> go.Figure:
     pane_inds = [k for k in active if INDICATOR_REGISTRY[k]["kind"] == "pane"]
     overlay_inds = [k for k in active if INDICATOR_REGISTRY[k]["kind"] == "overlay"]
 
@@ -888,7 +977,9 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
         showlegend=True,
         legend=dict(orientation="h", y=1.0, x=0, bgcolor="rgba(0,0,0,0)"),
         xaxis_rangeslider_visible=False,
-        hovermode="x unified",
+        hovermode="x",
+        hoverdistance=-1,
+        spikedistance=-1,
         dragmode="pan",
     )
     fig.update_xaxes(
@@ -906,10 +997,29 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
             dict(dtickrange=["M12", None], value="%Y"),
         ],
     )
-    # Horizontal crosshair line, matching the vertical dotted spike
-    fig.update_yaxes(gridcolor=GRID, side="right", showspikes=True,
-                     spikemode="across", spikecolor="#787b86",
-                     spikethickness=1, spikedash="dot")
+    fig.update_yaxes(gridcolor=GRID, side="right")
+    # Hover values are shown in the fixed bar above the chart (see the
+    # ohlc-bar script), so suppress the floating labels that would cover
+    # the candles around the cursor.
+    fig.update_traces(hoverinfo="none", hovertemplate=None)
+
+    if signals:
+        first, last = df.index[0], df.index[-1]
+        for sig in signals:
+            if first <= sig["time"] <= last:
+                # Anchor to the chart's own candle so the flag sits on the bar
+                # even if the strategy ran on a longer history.
+                try:
+                    y_low = float(df.loc[sig["time"], "low"])
+                except KeyError:
+                    y_low = sig["low"]
+                fig.add_annotation(
+                    x=sig["time"], y=y_low, text=sig["text"],
+                    showarrow=True, ax=0, ay=42, arrowhead=2, arrowwidth=1.5,
+                    arrowcolor=sig["color"], bgcolor=sig["color"],
+                    font=dict(color="#ffffff", size=10), opacity=0.9,
+                    borderpad=3, row=1, col=1,
+                )
     return fig
 
 
@@ -1008,10 +1118,14 @@ def create_app() -> dash.Dash:
         Input("panes", "value"),
         Input({"type": "param", "indicator": dash.ALL, "param": dash.ALL}, "value"),
         Input("refresh", "n_intervals"),
+        Input("strategy-select", "value"),
+        Input({"type": "sparam", "param": ALL}, "value"),
         State({"type": "param", "indicator": dash.ALL, "param": dash.ALL}, "id"),
+        State({"type": "sparam", "param": ALL}, "id"),
     )
     def update_chart(provider_name, symbol, interval, limit, start_date, active,
-                     panes, param_values, _tick, param_ids):
+                     panes, param_values, _tick, strategy_key, sparam_values,
+                     param_ids, sparam_ids):
         symbol = (symbol or "").strip().upper()
         if not symbol:
             return _empty_fig(), "Enter a symbol."
@@ -1038,8 +1152,15 @@ def create_app() -> dash.Dash:
                 f"{start.date() if start is not None else 'start'} — try an "
                 "earlier start date or a larger interval."
             )
+        signals = []
+        if interval == "1d":  # strategy flags only make sense on daily bars
+            sparams = _collect_strategy_params(strategy_key, sparam_ids,
+                                               sparam_values)
+            signals = _strategy_signals(strategy_key, symbol, provider_name,
+                                        sparams)
         fig = build_figure(df, symbol, active or [], params,
-                           show_volume="volume" in (panes or []))
+                           show_volume="volume" in (panes or []),
+                           signals=signals)
         return fig, status
 
     return app

@@ -56,7 +56,8 @@ container it binds `0.0.0.0:8050` by default; change the published port with
 - **Drag-to-resize panels**: grab the divider between sidebar/chart, chart/watchlist, or watchlist/strategy and drag
 - **Drag-to-resize chart panes**: drag the strip between the price, volume and oscillator panes to change their heights; the layout persists across refreshes (per pane count, in the browser)
 - **Zoom survives auto-refresh**: pan/zoom state is kept across the 30s data refresh and only resets when the symbol or pane structure changes
-- **Crosshair** with both vertical and horizontal dotted tracking lines
+- **Crosshair** with a vertical dotted tracking line, plus a fixed TradingView-style readout above the chart showing the hovered bar's OHLC and indicator values (no floating box covering the candles)
+- **Strategy buy flags on the chart** (1d interval): DCAi's executed buys appear as PULLBACK / OVERSOLD / FEAR labels with amounts on the price pane, sharing one cached simulation with the strategy panel
 - **Start date picker** to anchor the chart's history
 - **Overlay indicators** on the price pane:
   - Simple Moving Average (SMA)

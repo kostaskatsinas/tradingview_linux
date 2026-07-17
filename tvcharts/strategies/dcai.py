@@ -262,6 +262,8 @@ def run(df: pd.DataFrame, **p) -> dict:
     last_flip_bar = -100
     smart_peak = monthly_peak = smart_max_dd = monthly_max_dd = 0.0
 
+    signals: list[dict] = []   # executed buys: time/tier/amount/low
+
     # final-bar snapshot values
     prob = 0.0
     rolling_acc = 0.5
@@ -437,6 +439,13 @@ def run(df: pd.DataFrame, **p) -> dict:
                 if smart_first_bar is None:
                     smart_first_bar = t
                 pred_log.append((t, prob))
+                signals.append({
+                    "time": df.index[t],
+                    "tier": ("fear" if trigger_max else
+                             "oversold" if trigger_strong else "pullback"),
+                    "amount": recommended,
+                    "low": float(low[t]),
+                })
 
         # -- returns tracking (time-weighted) -------------------------------- #
         s_eq = smart_units * close[t]
@@ -490,6 +499,7 @@ def run(df: pd.DataFrame, **p) -> dict:
             monthly_ann = (cur_monthly_eq / monthly_invested) ** (365.0 / held) - 1.0
 
     return {
+        "signals": signals,
         "prob": prob,
         "rolling_acc": rolling_acc,
         "n_verified": len(pred_hits),
@@ -529,6 +539,51 @@ def run(df: pd.DataFrame, **p) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Cached runs — the panel and the chart flags share one simulation
+# --------------------------------------------------------------------------- #
+
+_RUN_CACHE: dict[tuple, dict] = {}
+
+
+def run_cached(symbol: str, df: pd.DataFrame, **params) -> dict:
+    key = (symbol, str(df.index[-1]), len(df),
+           tuple(sorted((k, str(v)) for k, v in params.items())))
+    hit = _RUN_CACHE.get(key)
+    if hit is not None:
+        return hit
+    if len(_RUN_CACHE) > 16:
+        _RUN_CACHE.clear()
+    result = run(df, **params)
+    _RUN_CACHE[key] = result
+    return result
+
+
+TIER_STYLE = {
+    "pullback": {"label": "PULLBACK", "color": "#26a69a"},
+    "oversold": {"label": "OVERSOLD", "color": PURPLE},
+    "fear": {"label": "FEAR", "color": PINK},
+}
+
+
+def get_signals(symbol: str | None = None, df: pd.DataFrame | None = None,
+                **params) -> list[dict]:
+    """Executed buys, styled for chart flags: time/low/text/color."""
+    if df is None or len(df) < 60:
+        return []
+    result = run_cached(symbol or "?", df, **params)
+    out = []
+    for sig in result["signals"]:
+        style = TIER_STYLE[sig["tier"]]
+        out.append({
+            "time": sig["time"],
+            "low": sig["low"],
+            "text": f"{style['label']}<br>€{sig['amount']:,.0f}",
+            "color": style["color"],
+        })
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Panel rows (mirrors the Pine dashboard)
 # --------------------------------------------------------------------------- #
 
@@ -537,7 +592,7 @@ def get_stats(symbol: str | None = None, df: pd.DataFrame | None = None,
     if df is None or len(df) < 60:
         return [{"label": "DCAi", "value": "need ≥60 daily bars",
                  "status": "WAIT", "status_color": ORANGE}]
-    r = run(df, **params)
+    r = run_cached(symbol or "?", df, **params)
 
     ml_status, ml_col = "IDLE", ORANGE
     if r["is_ml_bottom"]:
