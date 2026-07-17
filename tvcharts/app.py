@@ -809,12 +809,16 @@ _STRAT_GRID = {"display": "grid", "gridTemplateColumns": "1.2fr 1fr 0.9fr",
 
 
 def _strategy_df(symbol: str, provider_name: str):
-    """Daily bars with maximum history — the frame all strategies run on."""
+    """Daily bars with maximum history — the frame all strategies run on.
+
+    2800 bars matches the Pine indicator's max lookback, so the KNN model
+    trains on the same depth of history as TradingView.
+    """
     try:
-        return get_provider(provider_name).get_ohlcv(symbol, "1d", 1000)
+        return get_provider(provider_name).get_ohlcv(symbol, "1d", 2800)
     except ProviderError:
         try:
-            return get_provider("sample").get_ohlcv(symbol, "1d", 1000)
+            return get_provider("sample").get_ohlcv(symbol, "1d", 2800)
         except ProviderError:
             return None
 

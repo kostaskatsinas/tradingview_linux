@@ -84,3 +84,15 @@ def test_percentrank_matches_definition():
     assert np.isnan(out[:5]).all()
     # last value 3: previous 5 values [1,2,3,4,5], <=3 are [1,2,3] -> 60%
     assert out[5] == pytest.approx(60.0)
+
+
+def test_percentrank_propagates_nan_like_pine():
+    # Warm-up NaNs (e.g. before MA200 exists) must yield NaN ranks, not 0%,
+    # so those rows stay out of the KNN training set exactly like in Pine.
+    values = np.array([np.nan, np.nan, 3.0, 4, 5, 6, 7, 8])
+    out = dcai._percentrank(values, length=3)
+    assert np.isnan(out[3])   # window [nan, nan, 3] -> na
+    assert np.isnan(out[4])   # window [nan, 3, 4] -> na
+    assert out[5] == pytest.approx(100.0)  # window [3, 4, 5] vs 6
+    current_nan = np.array([1.0, 2, 3, np.nan, 5, 6])
+    assert np.isnan(dcai._percentrank(current_nan, length=3)[3])

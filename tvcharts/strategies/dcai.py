@@ -108,16 +108,24 @@ PREDICTION_WINDOW = 21  # bars ahead the model tries to predict
 # --------------------------------------------------------------------------- #
 
 def _percentrank(values: np.ndarray, length: int = 100) -> np.ndarray:
-    """Pine ta.percentrank: % of the previous `length` values <= current."""
+    """Pine ta.percentrank: % of the previous `length` values <= current.
+
+    Like Pine, the result is na while the source (or its window) is still
+    na — those rows must stay out of the KNN training set instead of being
+    counted as artificial 0-percentile readings.
+    """
     n = len(values)
     out = np.full(n, np.nan)
     if n <= length:
         return out
-    windows = np.lib.stride_tricks.sliding_window_view(values, length)
+    windows = np.lib.stride_tricks.sliding_window_view(values, length)[:-1]
     # windows[i] = values[i : i+length]; current value = values[i+length]
     current = values[length:]
+    valid = ~np.isnan(windows).any(axis=1) & ~np.isnan(current)
     with np.errstate(invalid="ignore"):
-        out[length:] = 100.0 * np.mean(windows[:-1] <= current[:, None], axis=1)
+        ranks = 100.0 * np.mean(windows <= current[:, None], axis=1)
+    ranks[~valid] = np.nan
+    out[length:] = ranks
     return out
 
 

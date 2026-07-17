@@ -131,27 +131,42 @@ class BinanceProvider(BaseProvider):
     def _fetch(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
         if interval not in INTERVALS:
             raise ProviderError(f"Unsupported interval: {interval}")
-        try:
-            resp = self._session.get(
-                self.BASE_URL,
-                params={"symbol": symbol, "interval": interval, "limit": min(limit, 1000)},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            raw = resp.json()
-        except requests.RequestException as exc:
-            raise ProviderError(f"Binance request failed for {symbol}: {exc}") from exc
-        if isinstance(raw, dict):  # Binance error payload, e.g. invalid symbol
-            raise ProviderError(f"Binance error for {symbol}: {raw.get('msg', raw)}")
-        if not raw:
+        # Binance caps a single request at 1000 klines; page backwards with
+        # endTime when more history is requested (strategies use up to 2800).
+        remaining = min(limit, 5000)
+        batches: list[list] = []
+        end_time: int | None = None
+        while remaining > 0:
+            params = {"symbol": symbol, "interval": interval,
+                      "limit": min(remaining, 1000)}
+            if end_time is not None:
+                params["endTime"] = end_time
+            try:
+                resp = self._session.get(self.BASE_URL, params=params, timeout=15)
+                resp.raise_for_status()
+                raw = resp.json()
+            except requests.RequestException as exc:
+                if batches:
+                    break  # keep what we already have
+                raise ProviderError(
+                    f"Binance request failed for {symbol}: {exc}") from exc
+            if isinstance(raw, dict):  # Binance error payload, e.g. bad symbol
+                raise ProviderError(
+                    f"Binance error for {symbol}: {raw.get('msg', raw)}")
+            if not raw:
+                break
+            batches.append(raw)
+            remaining -= len(raw)
+            if len(raw) < params["limit"]:
+                break  # start of the symbol's history reached
+            end_time = raw[0][0] - 1  # continue before the earliest open time
+        if not batches:
             raise ProviderError(f"No data returned for {symbol}")
-        frame = pd.DataFrame(
-            [row[:6] for row in raw],
-            columns=["time", *OHLCV_COLUMNS],
-        )
+        rows = [row[:6] for batch in batches for row in batch]
+        frame = pd.DataFrame(rows, columns=["time", *OHLCV_COLUMNS])
         frame["time"] = pd.to_datetime(frame["time"], unit="ms", utc=True)
-        frame = frame.set_index("time").astype(float)
-        return frame.sort_index()
+        frame = frame.set_index("time").astype(float).sort_index()
+        return frame[~frame.index.duplicated(keep="last")].tail(limit)
 
 
 class YahooProvider(BaseProvider):
@@ -179,7 +194,7 @@ class YahooProvider(BaseProvider):
         "30m": "1mo",
         "1h": "3mo",
         "4h": "3mo",  # requested as 1h and resampled
-        "1d": "2y",
+        "1d": "10y",
         "1w": "10y",
         "1M": "max",
     }
