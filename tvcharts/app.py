@@ -14,6 +14,7 @@ from dash import ALL, Input, Output, State, ctx, dcc, html
 from plotly.subplots import make_subplots
 
 from .indicators import INDICATOR_REGISTRY
+from .indicators import heikin_ashi as ind_heikin_ashi
 from .providers import BinanceProvider, INTERVALS, ProviderError, get_provider
 from .strategies import STRATEGIES, get_strategy_params
 
@@ -386,7 +387,7 @@ INDEX_STRING = """<!DOCTYPE html>
                                + x.slice(0, 16) + "</span>");
                     ev.points.forEach(function (pt) {
                         var tr = pt.data;
-                        if (tr.type === "candlestick") {
+                        if (tr.type === "candlestick" || tr.type === "ohlc") {
                             var i = pt.pointNumber !== undefined
                                 ? pt.pointNumber : pt.pointIndex;
                             var o = pt.open !== undefined ? pt.open : tr.open[i],
@@ -481,6 +482,23 @@ def build_layout() -> html.Div:
                          options=[{"label": k, "value": k} for k in INTERVALS],
                          value="1d", clearable=False, className="dark-dropdown"),
             html.Div(style={"height": "10px"}),
+            _control_label("Chart type"),
+            dcc.Dropdown(id="chart-type",
+                         options=[{"label": "Candles", "value": "candles"},
+                                  {"label": "Heikin Ashi", "value": "heikin"},
+                                  {"label": "Line", "value": "line"},
+                                  {"label": "OHLC bars", "value": "ohlc"}],
+                         value="candles", clearable=False,
+                         className="dark-dropdown"),
+            html.Button("＋ Horizontal line", id="add-hline", n_clicks=0,
+                        title="Add a draggable horizontal level at the last price",
+                        style={"marginTop": "8px", "width": "100%",
+                               "background": BG, "color": WHITE,
+                               "border": f"1px solid {GRID}",
+                               "borderRadius": "4px", "padding": "5px",
+                               "cursor": "pointer", "fontWeight": "600",
+                               "fontSize": "12px"}),
+            html.Div(style={"height": "10px"}),
             _control_label("Start date"),
             html.Div(
                 dcc.DatePickerSingle(id="start-date", date=None, clearable=True,
@@ -572,9 +590,13 @@ def build_layout() -> html.Div:
                             "textOverflow": "ellipsis"}),
             dcc.Loading(
                 dcc.Graph(id="chart", style={"height": "calc(100vh - 62px)"},
-                          config={"scrollZoom": True, "displaylogo": False}),
+                          config={"scrollZoom": True, "displaylogo": False,
+                                  "modeBarButtonsToAdd": ["drawline",
+                                                          "drawrect",
+                                                          "eraseshape"]}),
                 type="dot", color=ACCENT,
             ),
+            dcc.Store(id="drawings", data={}, storage_type="local"),
         ],
         style={"flex": "1", "minWidth": "0"},
     )
@@ -777,6 +799,36 @@ def _collect_strategy_params(strategy_key: str, param_ids, param_values,
     return out
 
 
+def _merge_drawings(relayout: dict, stored: dict, symbol: str,
+                    figure) -> dict | None:
+    """Fold a chart relayout event into the per-symbol drawings store.
+
+    Returns the updated store, or None when the event carried nothing
+    drawing-related (pane resizes, zooms, ...). Only shapes flagged
+    editable are user drawings — indicator hlines are not saved.
+    """
+    if not relayout:
+        return None
+    stored = dict(stored or {})
+    if "shapes" in relayout:  # draw or erase: full list provided
+        stored[symbol] = [s for s in relayout["shapes"] if s.get("editable")]
+        return stored
+    edits = {k: v for k, v in relayout.items() if k.startswith("shapes[")}
+    if not edits or figure is None:
+        return None
+    shapes = list((figure.get("layout") or {}).get("shapes") or [])
+    for key, value in edits.items():  # e.g. "shapes[3].x0": 17.4
+        try:
+            idx = int(key[key.index("[") + 1:key.index("]")])
+            prop = key.split(".", 1)[1]
+        except (ValueError, IndexError):
+            continue
+        if 0 <= idx < len(shapes):
+            shapes[idx] = {**shapes[idx], prop: value}
+    stored[symbol] = [s for s in shapes if s.get("editable")]
+    return stored
+
+
 def _fetch_quote(provider_name: str, sym: str):
     try:
         return get_provider(provider_name).get_ohlcv(sym, "1d", 2)
@@ -927,7 +979,9 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
                  signals: list[dict] | None = None,
                  equity: dict | None = None,
                  show_equity_pane: bool = False,
-                 show_avg_entry: bool = False) -> go.Figure:
+                 show_avg_entry: bool = False,
+                 chart_type: str = "candles",
+                 drawings: list[dict] | None = None) -> go.Figure:
     pane_inds = [k for k in active if INDICATOR_REGISTRY[k]["kind"] == "pane"]
     overlay_inds = [k for k in active if INDICATOR_REGISTRY[k]["kind"] == "overlay"]
 
@@ -953,13 +1007,27 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
                         vertical_spacing=0.02, row_heights=heights)
 
     # -- price ---------------------------------------------------------------
-    fig.add_trace(
-        go.Candlestick(x=df.index, open=df["open"], high=df["high"],
-                       low=df["low"], close=df["close"], name=symbol,
-                       increasing_line_color=UP, increasing_fillcolor=UP,
-                       decreasing_line_color=DOWN, decreasing_fillcolor=DOWN),
-        row=1, col=1,
-    )
+    if chart_type == "line":
+        fig.add_trace(go.Scatter(x=df.index, y=df["close"], name=symbol,
+                                 line=dict(color=ACCENT, width=1.6)),
+                      row=1, col=1)
+    elif chart_type == "ohlc":
+        fig.add_trace(go.Ohlc(x=df.index, open=df["open"], high=df["high"],
+                              low=df["low"], close=df["close"], name=symbol,
+                              increasing_line_color=UP,
+                              decreasing_line_color=DOWN),
+                      row=1, col=1)
+    else:
+        price_df = ind_heikin_ashi(df) if chart_type == "heikin" else df
+        fig.add_trace(
+            go.Candlestick(x=price_df.index, open=price_df["open"],
+                           high=price_df["high"], low=price_df["low"],
+                           close=price_df["close"], name=symbol,
+                           increasing_line_color=UP, increasing_fillcolor=UP,
+                           decreasing_line_color=DOWN,
+                           decreasing_fillcolor=DOWN),
+            row=1, col=1,
+        )
 
     color_i = 0
 
@@ -983,6 +1051,27 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
                           row=1, col=1)
             fig.add_trace(go.Scatter(x=df.index, y=result["basis"], name="BB basis",
                                      line=dict(color="#ff9800", width=1)),
+                          row=1, col=1)
+        elif key == "ichimoku":
+            fig.add_trace(go.Scatter(x=df.index, y=result["span_a"],
+                                     name="Span A",
+                                     line=dict(color="rgba(67,160,71,0.7)",
+                                               width=1)),
+                          row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=result["span_b"],
+                                     name="Span B",
+                                     line=dict(color="rgba(244,67,54,0.7)",
+                                               width=1),
+                                     fill="tonexty",
+                                     fillcolor="rgba(67,160,71,0.12)"),
+                          row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=result["tenkan"],
+                                     name="Tenkan",
+                                     line=dict(color="#2962ff", width=1)),
+                          row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=result["kijun"],
+                                     name="Kijun",
+                                     line=dict(color="#b71c1c", width=1.2)),
                           row=1, col=1)
         elif isinstance(result, dict):
             for sub, series in result.items():
@@ -1081,6 +1170,8 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
         hoverdistance=-1,
         spikedistance=-1,
         dragmode="pan",
+        newshape=dict(line=dict(color=ACCENT, width=1.5),
+                      fillcolor="rgba(41,98,255,0.15)"),
     )
     fig.update_xaxes(
         gridcolor=GRID, showspikes=True, spikemode="across",
@@ -1123,6 +1214,15 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
                     font=dict(color="#ffffff", size=10), opacity=0.9,
                     borderpad=3, row=1, col=1,
                 )
+
+    # User drawings (trend lines, levels, rects) — appended after all
+    # indicator hlines so their layout indexes are stable; editable=True is
+    # what distinguishes them from indicator shapes when saving edits.
+    for shape in drawings or []:
+        try:
+            fig.add_shape(**{**shape, "editable": True})
+        except Exception:
+            continue  # never let a corrupt stored shape break the chart
     return fig
 
 
@@ -1180,6 +1280,44 @@ def create_app() -> dash.Dash:
         elif isinstance(trigger, dict) and trigger.get("type") == "wl-del":
             data = [s for s in data if s != trigger["symbol"]]
         return data
+
+    @app.callback(Output("drawings", "data"),
+                  Input("chart", "relayoutData"),
+                  State("drawings", "data"),
+                  State("symbol", "value"),
+                  State("chart", "figure"),
+                  prevent_initial_call=True)
+    def save_drawings(relayout, stored, symbol, figure):
+        symbol = (symbol or "").strip().upper()
+        if not symbol:
+            raise dash.exceptions.PreventUpdate
+        updated = _merge_drawings(relayout, stored, symbol, figure)
+        if updated is None:
+            raise dash.exceptions.PreventUpdate
+        return updated
+
+    @app.callback(Output("drawings", "data", allow_duplicate=True),
+                  Input("add-hline", "n_clicks"),
+                  State("symbol", "value"),
+                  State("drawings", "data"),
+                  State("provider", "value"),
+                  prevent_initial_call=True)
+    def add_horizontal_line(_clicks, symbol, stored, provider_name):
+        symbol = (symbol or "").strip().upper()
+        if not symbol:
+            raise dash.exceptions.PreventUpdate
+        quote = _fetch_quote(provider_name, symbol)  # cached, cheap
+        if quote is None or quote.empty:
+            raise dash.exceptions.PreventUpdate
+        level = float(quote["close"].iloc[-1])
+        stored = dict(stored or {})
+        shapes = list(stored.get(symbol) or [])
+        shapes.append({"type": "line", "xref": "paper", "x0": 0, "x1": 1,
+                       "yref": "y", "y0": level, "y1": level,
+                       "line": {"color": "#ff9800", "width": 1.5},
+                       "editable": True})
+        stored[symbol] = shapes
+        return stored
 
     @app.callback(Output("watchlist-body", "children"),
                   Input("watchlist-v2", "data"),
@@ -1246,6 +1384,8 @@ def create_app() -> dash.Dash:
         Input("interval", "value"),
         Input("limit", "value"),
         Input("start-date", "date"),
+        Input("chart-type", "value"),
+        Input("drawings", "data"),
         Input("indicators", "value"),
         Input("panes", "value"),
         Input({"type": "param", "indicator": dash.ALL, "param": dash.ALL}, "value"),
@@ -1258,7 +1398,8 @@ def create_app() -> dash.Dash:
         State({"type": "sparam", "param": ALL}, "id"),
         State({"type": "sdate", "param": ALL}, "id"),
     )
-    def update_chart(provider_name, symbol, interval, limit, start_date, active,
+    def update_chart(provider_name, symbol, interval, limit, start_date,
+                     chart_type, drawings_data, active,
                      panes, param_values, _tick, strategy_key, strategy_display,
                      sparam_values, sdate_values, param_ids, sparam_ids,
                      sdate_ids):
@@ -1304,7 +1445,9 @@ def create_app() -> dash.Dash:
                            show_volume="volume" in (panes or []),
                            signals=signals, equity=equity,
                            show_equity_pane="equity" in display,
-                           show_avg_entry="avg" in display)
+                           show_avg_entry="avg" in display,
+                           chart_type=chart_type or "candles",
+                           drawings=(drawings_data or {}).get(symbol) or [])
         return fig, status
 
     return app
