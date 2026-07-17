@@ -1,0 +1,233 @@
+"""Free OHLCV data providers.
+
+All providers return a pandas DataFrame with a UTC DatetimeIndex and
+columns ``open, high, low, close, volume`` sorted oldest → newest.
+
+Included providers (no API key required):
+
+* BinanceProvider — crypto pairs (BTCUSDT, ETHUSDT, ...) from the public
+  Binance REST API. Generous limits (~1200 request-weight/min).
+* YahooProvider — stocks / ETFs / forex / indices (AAPL, SPY, EURUSD=X, ^GSPC)
+  from Yahoo Finance's public chart endpoint. Unofficial but widely used.
+* SampleProvider — deterministic synthetic data; works offline, used as a
+  fallback and in tests.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+
+import numpy as np
+import pandas as pd
+import requests
+
+OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
+
+# interval token used across the app -> seconds
+INTERVALS: dict[str, int] = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400,
+    "1w": 604800,
+}
+
+
+class ProviderError(RuntimeError):
+    """Raised when a data source cannot deliver candles."""
+
+
+@dataclass
+class _CacheEntry:
+    expires: float
+    frame: pd.DataFrame
+
+
+class BaseProvider:
+    """Common plumbing: HTTP session and a small in-memory TTL cache."""
+
+    name = "base"
+    cache_ttl = 30.0  # seconds
+
+    def __init__(self) -> None:
+        self._session = requests.Session()
+        self._session.headers["User-Agent"] = "tvcharts/0.1 (open-source charting app)"
+        self._cache: dict[tuple, _CacheEntry] = {}
+
+    def get_ohlcv(self, symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
+        key = (symbol.upper(), interval, limit)
+        hit = self._cache.get(key)
+        now = time.time()
+        if hit is not None and hit.expires > now:
+            return hit.frame
+        frame = self._fetch(symbol.upper(), interval, limit)
+        self._cache[key] = _CacheEntry(now + self.cache_ttl, frame)
+        return frame
+
+    def _fetch(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
+        raise NotImplementedError
+
+
+class BinanceProvider(BaseProvider):
+    """Crypto OHLCV from the public Binance API (no key needed)."""
+
+    name = "binance"
+    BASE_URL = "https://api.binance.com/api/v3/klines"
+
+    def _fetch(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
+        if interval not in INTERVALS:
+            raise ProviderError(f"Unsupported interval: {interval}")
+        try:
+            resp = self._session.get(
+                self.BASE_URL,
+                params={"symbol": symbol, "interval": interval, "limit": min(limit, 1000)},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+        except requests.RequestException as exc:
+            raise ProviderError(f"Binance request failed for {symbol}: {exc}") from exc
+        if isinstance(raw, dict):  # Binance error payload, e.g. invalid symbol
+            raise ProviderError(f"Binance error for {symbol}: {raw.get('msg', raw)}")
+        if not raw:
+            raise ProviderError(f"No data returned for {symbol}")
+        frame = pd.DataFrame(
+            [row[:6] for row in raw],
+            columns=["time", *OHLCV_COLUMNS],
+        )
+        frame["time"] = pd.to_datetime(frame["time"], unit="ms", utc=True)
+        frame = frame.set_index("time").astype(float)
+        return frame.sort_index()
+
+
+class YahooProvider(BaseProvider):
+    """Stocks/ETFs/forex/indices from Yahoo Finance's public chart endpoint."""
+
+    name = "yahoo"
+    BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+
+    # Yahoo only serves intraday data for short ranges; pick a sane range per interval.
+    _RANGE_FOR_INTERVAL = {
+        "1m": "5d",
+        "5m": "1mo",
+        "15m": "1mo",
+        "30m": "1mo",
+        "1h": "3mo",
+        "4h": "3mo",  # requested as 1h and resampled
+        "1d": "2y",
+        "1w": "10y",
+    }
+    _YAHOO_INTERVAL = {
+        "1m": "1m",
+        "5m": "5m",
+        "15m": "15m",
+        "30m": "30m",
+        "1h": "60m",
+        "4h": "60m",
+        "1d": "1d",
+        "1w": "1wk",
+    }
+
+    def _fetch(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
+        if interval not in self._YAHOO_INTERVAL:
+            raise ProviderError(f"Unsupported interval: {interval}")
+        try:
+            resp = self._session.get(
+                self.BASE_URL.format(symbol=symbol),
+                params={
+                    "interval": self._YAHOO_INTERVAL[interval],
+                    "range": self._RANGE_FOR_INTERVAL[interval],
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except requests.RequestException as exc:
+            raise ProviderError(f"Yahoo request failed for {symbol}: {exc}") from exc
+
+        result = (payload.get("chart") or {}).get("result")
+        if not result:
+            err = ((payload.get("chart") or {}).get("error") or {}).get("description")
+            raise ProviderError(f"Yahoo error for {symbol}: {err or 'no data'}")
+        result = result[0]
+        quote = result["indicators"]["quote"][0]
+        frame = pd.DataFrame(
+            {
+                "time": pd.to_datetime(result["timestamp"], unit="s", utc=True),
+                "open": quote["open"],
+                "high": quote["high"],
+                "low": quote["low"],
+                "close": quote["close"],
+                "volume": quote["volume"],
+            }
+        ).dropna(subset=["open", "high", "low", "close"])
+        frame = frame.set_index("time").astype(float).sort_index()
+        if interval == "4h":
+            frame = (
+                frame.resample("4h")
+                .agg(
+                    open=("open", "first"),
+                    high=("high", "max"),
+                    low=("low", "min"),
+                    close=("close", "last"),
+                    volume=("volume", "sum"),
+                )
+                .dropna(subset=["open"])
+            )
+        return frame.tail(limit)
+
+
+class SampleProvider(BaseProvider):
+    """Deterministic synthetic OHLCV — works with no network at all.
+
+    Prices follow a seeded geometric random walk, so a given symbol always
+    produces the same chart. Useful for demos, development and tests.
+    """
+
+    name = "sample"
+    cache_ttl = 3600.0
+
+    def _fetch(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
+        if interval not in INTERVALS:
+            raise ProviderError(f"Unsupported interval: {interval}")
+        seed = abs(hash(symbol)) % (2**32)
+        rng = np.random.default_rng(seed)
+        n = max(limit, 10)
+
+        base_price = 50.0 + (seed % 1000) * 60.0  # per-symbol price scale
+        returns = rng.normal(loc=0.0002, scale=0.02, size=n)
+        close = base_price * np.exp(np.cumsum(returns))
+        open_ = np.concatenate(([base_price], close[:-1]))
+        spread = np.abs(rng.normal(0.0, 0.008, size=n)) * close
+        high = np.maximum(open_, close) + spread
+        low = np.minimum(open_, close) - spread
+        volume = rng.integers(1_000, 100_000, size=n).astype(float)
+
+        step = INTERVALS[interval]
+        end = pd.Timestamp.now(tz="UTC").floor(f"{step}s")
+        index = pd.date_range(end=end, periods=n, freq=pd.Timedelta(seconds=step))
+        return pd.DataFrame(
+            {"open": open_, "high": high, "low": low, "close": close, "volume": volume},
+            index=pd.DatetimeIndex(index, name="time"),
+        )
+
+
+PROVIDERS: dict[str, BaseProvider] = {}
+
+
+def get_provider(name: str) -> BaseProvider:
+    """Return a shared provider instance by name ('binance', 'yahoo', 'sample')."""
+    if name not in PROVIDERS:
+        registry = {
+            "binance": BinanceProvider,
+            "yahoo": YahooProvider,
+            "sample": SampleProvider,
+        }
+        if name not in registry:
+            raise ProviderError(f"Unknown provider: {name}")
+        PROVIDERS[name] = registry[name]()
+    return PROVIDERS[name]
