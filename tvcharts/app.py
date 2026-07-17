@@ -531,6 +531,17 @@ def build_layout() -> html.Div:
                                   for k, v in STRATEGIES.items()],
                          value="dcai", clearable=False,
                          className="dark-dropdown"),
+            dcc.Checklist(
+                id="strategy-display",
+                options=[{"label": "Equity curve pane", "value": "equity"},
+                         {"label": "Avg entry line", "value": "avg"}],
+                value=[],
+                style={"display": "flex", "flexDirection": "column",
+                       "gap": "6px", "marginTop": "8px"},
+                inputStyle={"marginRight": "8px"},
+                labelStyle={"color": WHITE, "fontWeight": "600",
+                            "fontSize": "13px"},
+            ),
             html.Details(
                 [html.Summary("Strategy settings",
                               style={"cursor": "pointer", "margin": "12px 0 8px",
@@ -606,9 +617,26 @@ def build_layout() -> html.Div:
 
     strategy_box = html.Div(
         [
-            html.Div("Strategy", style={"color": WHITE, "fontWeight": "700",
-                                        "fontSize": "15px",
-                                        "marginBottom": "8px"}),
+            html.Div(
+                [
+                    html.Span("Strategy", style={"color": WHITE,
+                                                 "fontWeight": "700",
+                                                 "fontSize": "15px"}),
+                    html.Button("⤓ trades", id="trades-export", n_clicks=0,
+                                title="Download the executed buys as CSV",
+                                style={"background": "transparent",
+                                       "color": TEXT,
+                                       "border": f"1px solid {GRID}",
+                                       "borderRadius": "4px",
+                                       "padding": "2px 8px",
+                                       "cursor": "pointer",
+                                       "fontSize": "11px",
+                                       "fontWeight": "600"}),
+                ],
+                style={"display": "flex", "justifyContent": "space-between",
+                       "alignItems": "center", "marginBottom": "8px"},
+            ),
+            dcc.Download(id="trades-download"),
             dcc.Loading(html.Div(id="strategy-body"), type="dot", color=ACCENT),
         ],
         id="strategy-box",
@@ -838,6 +866,21 @@ def _strategy_signals(strategy_key: str, symbol: str, provider_name: str,
         return []
 
 
+def _strategy_equity(strategy_key: str, symbol: str, provider_name: str,
+                     params: dict):
+    """Equity curves for the chart pane, if the strategy provides them."""
+    module = STRATEGIES.get(strategy_key, {}).get("module")
+    if module is None or not hasattr(module, "get_equity"):
+        return None
+    df = _strategy_df(symbol, provider_name)
+    if df is None:
+        return None
+    try:
+        return module.get_equity(symbol=symbol, df=df, **params)
+    except Exception:
+        return None
+
+
 def _strategy_rows(strategy_key: str, symbol: str, provider_name: str,
                    params: dict) -> list:
     """Render rows from the selected strategy for the bottom-right box."""
@@ -881,19 +924,30 @@ def _strategy_rows(strategy_key: str, symbol: str, provider_name: str,
 
 def build_figure(df, symbol: str, active: list[str], params: dict,
                  show_volume: bool = True,
-                 signals: list[dict] | None = None) -> go.Figure:
+                 signals: list[dict] | None = None,
+                 equity: dict | None = None,
+                 show_equity_pane: bool = False,
+                 show_avg_entry: bool = False) -> go.Figure:
     pane_inds = [k for k in active if INDICATOR_REGISTRY[k]["kind"] == "pane"]
     overlay_inds = [k for k in active if INDICATOR_REGISTRY[k]["kind"] == "overlay"]
 
+    # clip strategy curves to the chart's visible time range
+    if equity:
+        equity = {k: s.loc[df.index[0]:df.index[-1]] for k, s in equity.items()}
+        if equity["equity"].empty:
+            equity = None
+    equity_pane = equity is not None and show_equity_pane
+
     vol_h = 0.12 if show_volume else 0.0
-    rows = 1 + (1 if show_volume else 0) + len(pane_inds)
-    if pane_inds:
+    n_panes = len(pane_inds) + (1 if equity_pane else 0)
+    rows = 1 + (1 if show_volume else 0) + n_panes
+    if n_panes:
         price_h = 0.55
     else:
         price_h = 1.0 - vol_h
-    pane_h = (1.0 - price_h - vol_h) / max(len(pane_inds), 1)
+    pane_h = (1.0 - price_h - vol_h) / max(n_panes, 1)
     heights = [price_h] + ([vol_h] if show_volume else []) \
-        + [pane_h] * len(pane_inds)
+        + [pane_h] * n_panes
 
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=True,
                         vertical_spacing=0.02, row_heights=heights)
@@ -987,6 +1041,30 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
                           row=row, col=1)
             fig.add_hline(y=20, line_color="#787b86", line_width=1, line_dash="dash",
                           row=row, col=1)
+
+    # -- strategy equity pane (DCAi vs blind DCA vs deployed capital) -------- #
+    if equity_pane:
+        row = first_pane_row + len(pane_inds)
+        fig.add_trace(go.Scatter(x=equity["invested"].index,
+                                 y=equity["invested"], name="Invested",
+                                 line=dict(color="#787b86", width=1,
+                                           dash="dot", shape="hv")),
+                      row=row, col=1)
+        fig.add_trace(go.Scatter(x=equity["bench"].index, y=equity["bench"],
+                                 name="Blind DCA",
+                                 line=dict(color="#b2b5be", width=1.3)),
+                      row=row, col=1)
+        fig.add_trace(go.Scatter(x=equity["equity"].index, y=equity["equity"],
+                                 name="DCAi equity",
+                                 line=dict(color=ACCENT, width=1.6)),
+                      row=row, col=1)
+
+    if show_avg_entry and equity is not None:
+        fig.add_trace(go.Scatter(x=equity["avg_entry"].index,
+                                 y=equity["avg_entry"], name="Avg entry",
+                                 line=dict(color="#b2b5be", width=1.5,
+                                           shape="hv", dash="dash")),
+                      row=1, col=1)
 
     fig.update_layout(
         template="plotly_dark",
@@ -1115,6 +1193,32 @@ def create_app() -> dash.Dash:
     def render_strategy_params(strategy_key):
         return _strategy_param_inputs(strategy_key)
 
+    @app.callback(Output("trades-download", "data"),
+                  Input("trades-export", "n_clicks"),
+                  State("strategy-select", "value"),
+                  State("symbol", "value"),
+                  State("provider", "value"),
+                  State({"type": "sparam", "param": ALL}, "value"),
+                  State({"type": "sdate", "param": ALL}, "date"),
+                  State({"type": "sparam", "param": ALL}, "id"),
+                  State({"type": "sdate", "param": ALL}, "id"),
+                  prevent_initial_call=True)
+    def export_trades(_clicks, strategy_key, symbol, provider_name,
+                      sparam_values, sdate_values, sparam_ids, sdate_ids):
+        module = STRATEGIES.get(strategy_key, {}).get("module")
+        symbol = (symbol or "").strip().upper()
+        if not symbol or module is None or not hasattr(module, "get_trades"):
+            raise dash.exceptions.PreventUpdate
+        params = _collect_strategy_params(strategy_key, sparam_ids,
+                                          sparam_values, sdate_ids,
+                                          sdate_values)
+        df = _strategy_df(symbol, provider_name)
+        trades = module.get_trades(symbol=symbol, df=df, **params)
+        if trades.empty:
+            raise dash.exceptions.PreventUpdate
+        return dcc.send_data_frame(trades.to_csv,
+                                   f"dcai_trades_{symbol}.csv", index=False)
+
     @app.callback(Output("strategy-body", "children"),
                   Input("strategy-select", "value"),
                   Input("symbol", "value"),
@@ -1147,6 +1251,7 @@ def create_app() -> dash.Dash:
         Input({"type": "param", "indicator": dash.ALL, "param": dash.ALL}, "value"),
         Input("refresh", "n_intervals"),
         Input("strategy-select", "value"),
+        Input("strategy-display", "value"),
         Input({"type": "sparam", "param": ALL}, "value"),
         Input({"type": "sdate", "param": ALL}, "date"),
         State({"type": "param", "indicator": dash.ALL, "param": dash.ALL}, "id"),
@@ -1154,8 +1259,9 @@ def create_app() -> dash.Dash:
         State({"type": "sdate", "param": ALL}, "id"),
     )
     def update_chart(provider_name, symbol, interval, limit, start_date, active,
-                     panes, param_values, _tick, strategy_key, sparam_values,
-                     sdate_values, param_ids, sparam_ids, sdate_ids):
+                     panes, param_values, _tick, strategy_key, strategy_display,
+                     sparam_values, sdate_values, param_ids, sparam_ids,
+                     sdate_ids):
         symbol = (symbol or "").strip().upper()
         if not symbol:
             return _empty_fig(), "Enter a symbol."
@@ -1183,15 +1289,22 @@ def create_app() -> dash.Dash:
                 "earlier start date or a larger interval."
             )
         signals = []
-        if interval == "1d":  # strategy flags only make sense on daily bars
+        equity = None
+        display = set(strategy_display or [])
+        if interval == "1d":  # strategy overlays only make sense on daily bars
             sparams = _collect_strategy_params(strategy_key, sparam_ids,
                                                sparam_values, sdate_ids,
                                                sdate_values)
             signals = _strategy_signals(strategy_key, symbol, provider_name,
                                         sparams)
+            if display & {"equity", "avg"}:
+                equity = _strategy_equity(strategy_key, symbol, provider_name,
+                                          sparams)
         fig = build_figure(df, symbol, active or [], params,
                            show_volume="volume" in (panes or []),
-                           signals=signals)
+                           signals=signals, equity=equity,
+                           show_equity_pane="equity" in display,
+                           show_avg_entry="avg" in display)
         return fig, status
 
     return app

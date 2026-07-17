@@ -65,6 +65,34 @@ def test_start_end_date_gate_the_period(df):
     assert all(s["time"] <= start_ts for s in early_end["signals"])
 
 
+def test_equity_curves_consistent(df):
+    r = dcai.run(df)
+    eq = r["equity_curve"]
+    assert not eq.empty
+    assert len(eq) == len(r["bench_curve"]) == len(r["invested_curve"])
+    # last curve point equals the final reported equity/invested
+    assert eq.iloc[-1] == pytest.approx(r["smart_equity"])
+    assert r["bench_curve"].iloc[-1] == pytest.approx(r["monthly_equity"])
+    assert r["invested_curve"].iloc[-1] == pytest.approx(r["smart_invested"])
+    # invested capital only ever grows
+    assert (r["invested_curve"].diff().dropna() >= -1e-9).all()
+
+
+def test_get_equity_and_trades(df):
+    eq = dcai.get_equity("BTCUSDT", df)
+    assert eq is not None
+    assert set(eq) == {"equity", "bench", "invested", "avg_entry"}
+    trades = dcai.get_trades("BTCUSDT", df)
+    if not trades.empty:
+        assert list(trades.columns) == ["date", "tier", "amount", "from_pot",
+                                        "price", "units"]
+        assert (trades["amount"] > 0).all()
+        # units * price recovers the invested amount
+        recon = trades["units"] * trades["price"]
+        assert recon.sub(trades["amount"]).abs().max() < 0.01
+    assert dcai.get_trades("X", None).empty
+
+
 def test_default_params_match_pine_dialog():
     p = dcai.PARAMS
     assert p["budget"]["default"] == 300.0

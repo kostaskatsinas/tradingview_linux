@@ -288,6 +288,12 @@ def run(df: pd.DataFrame, **p) -> dict:
     smart_peak = monthly_peak = smart_max_dd = monthly_max_dd = 0.0
 
     signals: list[dict] = []   # executed buys: time/tier/amount/low
+    # per-bar history inside the active period (for the equity-curve pane)
+    curve_times: list = []
+    curve_smart: list[float] = []
+    curve_bench: list[float] = []
+    curve_invested: list[float] = []
+    curve_avg_entry: list[float] = []
 
     # final-bar snapshot values
     prob = 0.0
@@ -497,6 +503,13 @@ def run(df: pd.DataFrame, **p) -> dict:
         # -- drawdown tracking (equity incl. pot) ----------------------------- #
         cur_smart_eq = smart_units * close[t] + savings_pot
         cur_monthly_eq = monthly_units * close[t]
+        if in_period:
+            curve_times.append(df.index[t])
+            curve_smart.append(cur_smart_eq)
+            curve_bench.append(cur_monthly_eq)
+            curve_invested.append(smart_invested)
+            curve_avg_entry.append(smart_invested / smart_units
+                                   if smart_units else float("nan"))
         smart_peak = max(smart_peak, cur_smart_eq)
         if smart_peak > 0:
             smart_max_dd = max(smart_max_dd,
@@ -532,8 +545,13 @@ def run(df: pd.DataFrame, **p) -> dict:
         if held >= 180:
             monthly_ann = (cur_monthly_eq / monthly_invested) ** (365.0 / held) - 1.0
 
+    curve_index = pd.DatetimeIndex(curve_times)
     return {
         "signals": signals,
+        "equity_curve": pd.Series(curve_smart, index=curve_index),
+        "bench_curve": pd.Series(curve_bench, index=curve_index),
+        "invested_curve": pd.Series(curve_invested, index=curve_index),
+        "avg_entry_curve": pd.Series(curve_avg_entry, index=curve_index),
         "prob": prob,
         "rolling_acc": rolling_acc,
         "n_verified": len(pred_hits),
@@ -625,6 +643,42 @@ def get_signals(symbol: str | None = None, df: pd.DataFrame | None = None,
                 "color": ORANGE,
             })
     return out
+
+
+def get_equity(symbol: str | None = None, df: pd.DataFrame | None = None,
+               **params) -> dict | None:
+    """Curves for the equity pane: DCAi vs blind DCA vs invested capital."""
+    if df is None or len(df) < 60:
+        return None
+    r = run_cached(symbol or "?", df, **params)
+    if r["equity_curve"].empty:
+        return None
+    return {
+        "equity": r["equity_curve"],
+        "bench": r["bench_curve"],
+        "invested": r["invested_curve"],
+        "avg_entry": r["avg_entry_curve"],
+    }
+
+
+def get_trades(symbol: str | None = None, df: pd.DataFrame | None = None,
+               **params) -> pd.DataFrame:
+    """Executed buys as a flat table (for CSV export)."""
+    if df is None or len(df) < 60:
+        return pd.DataFrame()
+    r = run_cached(symbol or "?", df, **params)
+    rows = []
+    for sig in r["signals"]:
+        price = float(df.loc[sig["time"], "close"])
+        rows.append({
+            "date": sig["time"].date().isoformat(),
+            "tier": sig["tier"],
+            "amount": round(sig["amount"], 2),
+            "from_pot": round(sig.get("pot_used", 0.0), 2),
+            "price": price,
+            "units": round(sig["amount"] / price, 8),
+        })
+    return pd.DataFrame(rows)
 
 
 # --------------------------------------------------------------------------- #
