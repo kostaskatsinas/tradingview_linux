@@ -48,7 +48,9 @@ container it binds `0.0.0.0:8050` by default; change the published port with
 - **Candlestick chart** with pan, scroll-zoom, crosshair and unified hover — dark TradingView-style theme
 - **Zoom-adaptive time axis**: labels shift from years → month+year → week/day → intraday times as you zoom in
 - **Symbol dropdown** with the top 100 pairs (live by 24h volume on Binance, curated lists elsewhere) — free typing still works for any symbol
-- **Watchlist panel** on the right: pin any pair, see Last / Chg / Chg% at a glance (auto-refreshing), click a row to load it on the chart; persists across restarts in the browser
+- **Watchlist panel** on the right: pin any pair, see Last / Chg / Chg% at a glance (auto-refreshing, fetched concurrently), click a row to load it on the chart; persists across restarts in the browser
+- **Volume pane toggle** (Panes → Volume) to hide/show the volume chart
+- **Strategy panel** (bottom-right quarter): implement `get_stats()` in `tvcharts/strategy.py` to display your own strategy's stats (label / value / status rows, colors supported) — see the docstring for an example
 - **Start date picker** to anchor the chart's history
 - **Overlay indicators** on the price pane:
   - Simple Moving Average (SMA)
@@ -173,6 +175,7 @@ tvcharts/
   app.py                # Dash layout, callbacks, figure builder
   indicators.py         # indicator math + registry
   providers.py          # Binance / Yahoo / Sample providers, TTL cache
+  strategy.py           # your strategy's stats for the bottom-right panel
 tests/
   test_indicators.py    # math verified against hand-computed values
   test_providers.py     # provider contract + cache tests (offline)

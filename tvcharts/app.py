@@ -5,12 +5,15 @@ Run with:  python run.py   (then open http://127.0.0.1:8050)
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import dash
 import pandas as pd
 import plotly.graph_objects as go
 from dash import ALL, Input, Output, State, ctx, dcc, html
 from plotly.subplots import make_subplots
 
+from . import strategy
 from .indicators import INDICATOR_REGISTRY
 from .providers import BinanceProvider, INTERVALS, ProviderError, get_provider
 
@@ -34,7 +37,12 @@ PROVIDER_OPTIONS = [
 ]
 
 DEFAULT_SYMBOL = {"binance": "BTCUSDT", "yahoo": "AAPL", "sample": "DEMO"}
-DEFAULT_WATCHLIST = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
+# USD pairs from other exchanges map to their Binance USDT equivalents.
+DEFAULT_WATCHLIST = [
+    "BTCUSDT", "BTCEUR", "ETHUSDT", "ETHEUR", "SOLEUR", "BNBEUR",
+    "RUNEEUR", "ATOMUSDT", "DOTEUR", "HNTUSDT", "APTEUR", "PYTHUSDT",
+    "THETAUSDT", "SUIUSDT", "LINKEUR", "ASTERUSDT", "ETHBTC", "TRXEUR",
+]
 WATCHLIST_MAX = 30
 
 # Custom CSS: dark dropdowns/date picker + white bold sidebar text
@@ -75,7 +83,7 @@ INDEX_STRING = """<!DOCTYPE html>
             .dash-options-list-option.selected {
                 background: #2a2e39 !important; color: #fff !important;
             }
-            /* Dark theme for the date picker */
+            /* Dark theme for the date picker — white bold text everywhere */
             .dash-datepicker, .dash-datepicker-input-container {
                 background: #131722 !important;
                 border: 1px solid #2a2e39 !important;
@@ -84,10 +92,23 @@ INDEX_STRING = """<!DOCTYPE html>
             .dash-datepicker-input {
                 background: #131722 !important;
                 color: #fff !important;
-                font-weight: 600;
+                font-weight: 700;
+            }
+            .dash-datepicker-input::placeholder {
+                color: #fff !important; font-weight: 700; opacity: 1;
             }
             .dash-datepicker-calendar, .dash-datepicker-content {
-                background: #1e222d !important; color: #d1d4dc !important;
+                background: #1e222d !important;
+                border: 1px solid #2a2e39 !important;
+            }
+            .dash-datepicker-calendar, .dash-datepicker-calendar *,
+            .dash-datepicker-content, .dash-datepicker-content * {
+                color: #fff !important; font-weight: 700;
+            }
+            /* year/month inputs inside the calendar popup */
+            .dash-datepicker-calendar input, .dash-datepicker-content input,
+            .dash-datepicker-calendar select, .dash-datepicker-content select {
+                background: #131722 !important;
                 border: 1px solid #2a2e39 !important;
             }
             .wl-row:hover { background: #2a2e39; }
@@ -171,8 +192,20 @@ def build_layout() -> html.Div:
             html.Div(style={"height": "10px"}),
             _control_label("Bars"),
             dcc.Slider(id="limit", min=50, max=1000, step=50, value=300,
-                       marks={50: "50", 500: "500", 1000: "1000"},
+                       marks={v: {"label": str(v),
+                                  "style": {"color": WHITE, "fontWeight": "700"}}
+                              for v in (50, 500, 1000)},
                        tooltip={"placement": "bottom"}),
+            html.Div(style={"height": "16px"}),
+            _control_label("Panes"),
+            dcc.Checklist(
+                id="panes",
+                options=[{"label": "Volume", "value": "volume"}],
+                value=["volume"],
+                style={"marginTop": "6px"},
+                inputStyle={"marginRight": "8px"},
+                labelStyle={"color": WHITE, "fontWeight": "600", "fontSize": "13px"},
+            ),
             html.Div(style={"height": "16px"}),
             _control_label("Indicators"),
             dcc.Checklist(
@@ -239,14 +272,34 @@ def build_layout() -> html.Div:
                 style={**_WL_GRID, "borderBottom": f"1px solid {GRID}"},
             ),
             html.Div(id="watchlist-body"),
-            dcc.Store(id="watchlist", data=DEFAULT_WATCHLIST, storage_type="local"),
+            # v2 key: bumping the id resets browsers that stored the old default list
+            dcc.Store(id="watchlist-v2", data=DEFAULT_WATCHLIST, storage_type="local"),
         ],
-        style={"width": "290px", "minWidth": "290px", "background": PANEL,
-               "borderLeft": f"1px solid {GRID}", "padding": "12px",
-               "overflowY": "auto"},
+        # Top three quarters of the right column, scrolls independently
+        style={"flex": "3", "minHeight": "0", "overflowY": "auto",
+               "padding": "12px"},
     )
 
-    return html.Div([sidebar, chart, watchlist],
+    strategy_box = html.Div(
+        [
+            html.Div("Strategy", style={"color": WHITE, "fontWeight": "700",
+                                        "fontSize": "15px",
+                                        "marginBottom": "8px"}),
+            html.Div(id="strategy-body"),
+        ],
+        # Reserved bottom quarter: populated from tvcharts/strategy.py
+        style={"flex": "1", "minHeight": "0", "overflowY": "auto",
+               "padding": "12px", "borderTop": f"2px solid {GRID}"},
+    )
+
+    right_column = html.Div(
+        [watchlist, strategy_box],
+        style={"width": "290px", "minWidth": "290px", "background": PANEL,
+               "borderLeft": f"1px solid {GRID}", "display": "flex",
+               "flexDirection": "column", "height": "100vh"},
+    )
+
+    return html.Div([sidebar, chart, right_column],
                     style={"display": "flex", "height": "100vh", "margin": "0",
                            "background": BG, "color": TEXT,
                            "fontFamily": "'Trebuchet MS', Roboto, sans-serif"})
@@ -278,18 +331,24 @@ def _fmt_price(v: float) -> str:
     return f"{v:.4f}"
 
 
+def _fetch_quote(provider_name: str, sym: str):
+    try:
+        return get_provider(provider_name).get_ohlcv(sym, "1d", 2)
+    except ProviderError:
+        try:
+            return get_provider("sample").get_ohlcv(sym, "1d", 2)
+        except ProviderError:
+            return None
+
+
 def _watchlist_rows(symbols: list[str], provider_name: str) -> list:
     rows = []
-    provider = get_provider(provider_name)
-    for sym in symbols:
+    # Fetch all quotes concurrently — one slow/unreachable symbol must not
+    # stall the whole panel.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        frames = list(pool.map(lambda s: _fetch_quote(provider_name, s), symbols))
+    for sym, df in zip(symbols, frames):
         last = chg = pct = None
-        try:
-            df = provider.get_ohlcv(sym, "1d", 2)
-        except ProviderError:
-            try:
-                df = get_provider("sample").get_ohlcv(sym, "1d", 2)
-            except ProviderError:
-                df = None
         if df is not None and len(df) >= 2:
             last = float(df["close"].iloc[-1])
             prev = float(df["close"].iloc[-2])
@@ -327,14 +386,67 @@ def _watchlist_rows(symbols: list[str], provider_name: str) -> list:
     return rows
 
 
-def build_figure(df, symbol: str, active: list[str], params: dict) -> go.Figure:
+_STRAT_GRID = {"display": "grid", "gridTemplateColumns": "1.2fr 1fr 0.9fr",
+               "gap": "4px", "alignItems": "center", "padding": "3px 6px"}
+
+
+def _strategy_rows(symbol: str, provider_name: str) -> list:
+    """Render rows from tvcharts.strategy.get_stats for the bottom-right box."""
+    df = None
+    try:
+        df = get_provider(provider_name).get_ohlcv(symbol, "1d", 300)
+    except ProviderError:
+        try:
+            df = get_provider("sample").get_ohlcv(symbol, "1d", 300)
+        except ProviderError:
+            df = None
+    try:
+        stats = strategy.get_stats(symbol=symbol, df=df)
+    except Exception as exc:  # a broken user strategy must not kill the UI
+        return [html.Div(f"strategy error: {exc}",
+                         style={"color": DOWN, "fontSize": "12px"})]
+    if not stats:
+        return [html.Div(
+            ["No strategy wired yet — implement ", html.Code("get_stats()"),
+             " in ", html.Code("tvcharts/strategy.py"),
+             " to fill this box."],
+            style={"color": "#787b86", "fontSize": "12px", "padding": "6px 2px",
+                   "lineHeight": "1.5"},
+        )]
+    rows = []
+    for stat in stats:
+        rows.append(html.Div(
+            [
+                html.Span(stat.get("label", ""),
+                          style={"color": WHITE, "fontWeight": "700",
+                                 "fontSize": "12px"}),
+                html.Span(str(stat.get("value", "")),
+                          style={"color": TEXT, "fontWeight": "600",
+                                 "fontSize": "12px", "textAlign": "right"}),
+                html.Span(str(stat.get("status", "")),
+                          style={"color": stat.get("status_color", TEXT),
+                                 "fontWeight": "700", "fontSize": "12px",
+                                 "textAlign": "right"}),
+            ],
+            style={**_STRAT_GRID, "borderBottom": f"1px solid {GRID}"},
+        ))
+    return rows
+
+
+def build_figure(df, symbol: str, active: list[str], params: dict,
+                 show_volume: bool = True) -> go.Figure:
     pane_inds = [k for k in active if INDICATOR_REGISTRY[k]["kind"] == "pane"]
     overlay_inds = [k for k in active if INDICATOR_REGISTRY[k]["kind"] == "overlay"]
 
-    rows = 2 + len(pane_inds)  # price + volume + one row per oscillator
-    price_h = 0.55 if pane_inds else 0.8
-    pane_h = (1.0 - price_h - 0.12) / max(len(pane_inds), 1)
-    heights = [price_h, 0.12] + [pane_h] * len(pane_inds)
+    vol_h = 0.12 if show_volume else 0.0
+    rows = 1 + (1 if show_volume else 0) + len(pane_inds)
+    if pane_inds:
+        price_h = 0.55
+    else:
+        price_h = 1.0 - vol_h
+    pane_h = (1.0 - price_h - vol_h) / max(len(pane_inds), 1)
+    heights = [price_h] + ([vol_h] if show_volume else []) \
+        + [pane_h] * len(pane_inds)
 
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=True,
                         vertical_spacing=0.02, row_heights=heights)
@@ -387,14 +499,17 @@ def build_figure(df, symbol: str, active: list[str], params: dict) -> go.Figure:
                           row=1, col=1)
 
     # -- volume --------------------------------------------------------------
-    vol_colors = [UP if c >= o else DOWN for o, c in zip(df["open"], df["close"])]
-    fig.add_trace(go.Bar(x=df.index, y=df["volume"], name="Volume",
-                         marker_color=vol_colors, opacity=0.5),
-                  row=2, col=1)
+    if show_volume:
+        vol_colors = [UP if c >= o else DOWN
+                      for o, c in zip(df["open"], df["close"])]
+        fig.add_trace(go.Bar(x=df.index, y=df["volume"], name="Volume",
+                             marker_color=vol_colors, opacity=0.5),
+                      row=2, col=1)
 
     # -- oscillator panes ----------------------------------------------------
+    first_pane_row = 2 + (1 if show_volume else 0)
     for i, key in enumerate(pane_inds):
-        row = 3 + i
+        row = first_pane_row + i
         spec = INDICATOR_REGISTRY[key]
         result = spec["func"](df, **params.get(key, {}))
         if key == "macd":
@@ -492,10 +607,10 @@ def create_app() -> dash.Dash:
             raise dash.exceptions.PreventUpdate
         return ctx.triggered_id["symbol"]
 
-    @app.callback(Output("watchlist", "data"),
+    @app.callback(Output("watchlist-v2", "data"),
                   Input("watch-add", "n_clicks"),
                   Input({"type": "wl-del", "symbol": ALL}, "n_clicks"),
-                  State("watchlist", "data"),
+                  State("watchlist-v2", "data"),
                   State("symbol", "value"),
                   prevent_initial_call=True)
     def edit_watchlist(_add, _dels, data, symbol):
@@ -512,11 +627,21 @@ def create_app() -> dash.Dash:
         return data
 
     @app.callback(Output("watchlist-body", "children"),
-                  Input("watchlist", "data"),
+                  Input("watchlist-v2", "data"),
                   Input("provider", "value"),
                   Input("refresh", "n_intervals"))
     def render_watchlist(symbols, provider_name, _tick):
         return _watchlist_rows(list(symbols or []), provider_name)
+
+    @app.callback(Output("strategy-body", "children"),
+                  Input("symbol", "value"),
+                  Input("provider", "value"),
+                  Input("refresh", "n_intervals"))
+    def render_strategy(symbol, provider_name, _tick):
+        symbol = (symbol or "").strip().upper()
+        if not symbol:
+            return []
+        return _strategy_rows(symbol, provider_name)
 
     @app.callback(
         Output("chart", "figure"),
@@ -527,12 +652,13 @@ def create_app() -> dash.Dash:
         Input("limit", "value"),
         Input("start-date", "date"),
         Input("indicators", "value"),
+        Input("panes", "value"),
         Input({"type": "param", "indicator": dash.ALL, "param": dash.ALL}, "value"),
         Input("refresh", "n_intervals"),
         State({"type": "param", "indicator": dash.ALL, "param": dash.ALL}, "id"),
     )
     def update_chart(provider_name, symbol, interval, limit, start_date, active,
-                     param_values, _tick, param_ids):
+                     panes, param_values, _tick, param_ids):
         symbol = (symbol or "").strip().upper()
         if not symbol:
             return _empty_fig(), "Enter a symbol."
@@ -559,7 +685,8 @@ def create_app() -> dash.Dash:
                 f"{start.date() if start is not None else 'start'} — try an "
                 "earlier start date or a larger interval."
             )
-        fig = build_figure(df, symbol, active or [], params)
+        fig = build_figure(df, symbol, active or [], params,
+                           show_volume="volume" in (panes or []))
         return fig, status
 
     return app
