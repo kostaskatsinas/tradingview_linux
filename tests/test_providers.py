@@ -51,3 +51,28 @@ def test_cache_returns_same_frame():
     a = provider.get_ohlcv("DEMO", "1d", 50)
     b = provider.get_ohlcv("DEMO", "1d", 50)
     assert a is b  # served from TTL cache
+
+
+def test_start_date_filters_bars():
+    provider = SampleProvider()
+    full = provider.get_ohlcv("DEMO", "1d", 100)
+    start = full.index[60]
+    sliced = provider.get_ohlcv("DEMO", "1d", 100, start=start)
+    assert len(sliced) == 40
+    assert sliced.index[0] == start
+
+
+def test_one_month_interval():
+    df = SampleProvider().get_ohlcv("DEMO", "1M", 24)
+    deltas = df.index.to_series().diff().dropna().dt.total_seconds()
+    assert (deltas == INTERVALS["1M"]).all()
+
+
+def test_list_symbols_static():
+    symbols = SampleProvider().list_symbols()
+    assert "DEMO" in symbols
+    from tvcharts.providers import BinanceProvider, YahooProvider
+
+    assert len(BinanceProvider.STATIC_SYMBOLS) >= 50
+    assert "BTCUSDT" in BinanceProvider.STATIC_SYMBOLS
+    assert "AAPL" in YahooProvider.STATIC_SYMBOLS

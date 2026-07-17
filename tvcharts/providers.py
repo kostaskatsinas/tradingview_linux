@@ -34,6 +34,7 @@ INTERVALS: dict[str, int] = {
     "4h": 14400,
     "1d": 86400,
     "1w": 604800,
+    "1M": 2592000,
 }
 
 
@@ -52,21 +53,36 @@ class BaseProvider:
 
     name = "base"
     cache_ttl = 30.0  # seconds
+    STATIC_SYMBOLS: list[str] = []
 
     def __init__(self) -> None:
         self._session = requests.Session()
         self._session.headers["User-Agent"] = "tvcharts/0.1 (open-source charting app)"
         self._cache: dict[tuple, _CacheEntry] = {}
+        self._symbols: list[str] | None = None
+        self._symbols_expiry = 0.0
 
-    def get_ohlcv(self, symbol: str, interval: str, limit: int = 300) -> pd.DataFrame:
-        key = (symbol.upper(), interval, limit)
+    def get_ohlcv(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int = 300,
+        start: pd.Timestamp | None = None,
+    ) -> pd.DataFrame:
+        key = (symbol.upper(), interval, limit, None if start is None else str(start))
         hit = self._cache.get(key)
         now = time.time()
         if hit is not None and hit.expires > now:
             return hit.frame
         frame = self._fetch(symbol.upper(), interval, limit)
+        if start is not None:
+            frame = frame[frame.index >= start]
         self._cache[key] = _CacheEntry(now + self.cache_ttl, frame)
         return frame
+
+    def list_symbols(self, limit: int = 100) -> list[str]:
+        """Suggested symbols for the UI dropdown (static per provider)."""
+        return list(self.STATIC_SYMBOLS)[:limit]
 
     def _fetch(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
         raise NotImplementedError
@@ -77,6 +93,40 @@ class BinanceProvider(BaseProvider):
 
     name = "binance"
     BASE_URL = "https://api.binance.com/api/v3/klines"
+    TICKER_URL = "https://api.binance.com/api/v3/ticker/24hr"
+
+    # Fallback when the exchange can't be reached (offline development)
+    STATIC_SYMBOLS = [
+        "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
+        "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "TRXUSDT", "MATICUSDT",
+        "LTCUSDT", "SHIBUSDT", "UNIUSDT", "ATOMUSDT", "XLMUSDT", "NEARUSDT",
+        "APTUSDT", "ARBUSDT", "OPUSDT", "FILUSDT", "INJUSDT", "SUIUSDT",
+        "PEPEUSDT", "AAVEUSDT", "MKRUSDT", "GRTUSDT", "ALGOUSDT", "FTMUSDT",
+        "SANDUSDT", "MANAUSDT", "AXSUSDT", "THETAUSDT", "EGLDUSDT", "EOSUSDT",
+        "XTZUSDT", "CHZUSDT", "CRVUSDT", "SNXUSDT", "COMPUSDT", "ENJUSDT",
+        "KSMUSDT", "DASHUSDT", "ZECUSDT", "XMRUSDT", "BCHUSDT", "ETCUSDT",
+        "VETUSDT", "ICPUSDT", "HBARUSDT", "QNTUSDT", "LDOUSDT", "STXUSDT",
+        "IMXUSDT", "FLOWUSDT", "GALAUSDT", "MINAUSDT", "RUNEUSDT", "KAVAUSDT",
+        "BTCEUR", "ETHEUR", "BNBEUR", "XRPEUR", "SOLEUR", "ADAEUR", "DOGEEUR",
+        "BTCUSDC", "ETHUSDC", "BTCGBP", "ETHGBP",
+    ]
+
+    def list_symbols(self, limit: int = 100) -> list[str]:
+        """Top pairs by 24h quote volume, refreshed hourly; static fallback."""
+        now = time.time()
+        if self._symbols is not None and self._symbols_expiry > now:
+            return self._symbols
+        try:
+            resp = self._session.get(self.TICKER_URL, timeout=15)
+            resp.raise_for_status()
+            tickers = resp.json()
+            tickers.sort(key=lambda t: float(t.get("quoteVolume", 0.0)), reverse=True)
+            symbols = [t["symbol"] for t in tickers[:limit]]
+        except (requests.RequestException, ValueError, KeyError, TypeError):
+            symbols = list(self.STATIC_SYMBOLS)[:limit]
+        self._symbols = symbols
+        self._symbols_expiry = now + 3600
+        return symbols
 
     def _fetch(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
         if interval not in INTERVALS:
@@ -110,6 +160,17 @@ class YahooProvider(BaseProvider):
     name = "yahoo"
     BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
+    STATIC_SYMBOLS = [
+        "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B",
+        "JPM", "V", "UNH", "XOM", "LLY", "JNJ", "WMT", "PG", "MA", "HD",
+        "CVX", "MRK", "ABBV", "KO", "PEP", "AVGO", "COST", "ORCL", "BAC",
+        "CRM", "AMD", "NFLX", "ADBE", "DIS", "CSCO", "INTC", "TMO", "ABT",
+        "NKE", "IBM", "QCOM", "TXN", "PYPL", "UBER", "SHOP", "PLTR",
+        "SPY", "QQQ", "DIA", "IWM", "VTI", "^GSPC", "^IXIC", "^DJI",
+        "EURUSD=X", "GBPUSD=X", "JPY=X", "CHF=X", "AUDUSD=X",
+        "GC=F", "SI=F", "CL=F", "NG=F", "BTC-USD", "ETH-USD",
+    ]
+
     # Yahoo only serves intraday data for short ranges; pick a sane range per interval.
     _RANGE_FOR_INTERVAL = {
         "1m": "5d",
@@ -120,6 +181,7 @@ class YahooProvider(BaseProvider):
         "4h": "3mo",  # requested as 1h and resampled
         "1d": "2y",
         "1w": "10y",
+        "1M": "max",
     }
     _YAHOO_INTERVAL = {
         "1m": "1m",
@@ -130,6 +192,7 @@ class YahooProvider(BaseProvider):
         "4h": "60m",
         "1d": "1d",
         "1w": "1wk",
+        "1M": "1mo",
     }
 
     def _fetch(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
@@ -190,6 +253,7 @@ class SampleProvider(BaseProvider):
 
     name = "sample"
     cache_ttl = 3600.0
+    STATIC_SYMBOLS = ["DEMO", "BTCUSDT", "ETHUSDT", "ACME", "TEST"]
 
     def _fetch(self, symbol: str, interval: str, limit: int) -> pd.DataFrame:
         if interval not in INTERVALS:

@@ -1,4 +1,4 @@
-# tvcharts — a TradingView-style charting app in Python
+# TradingView Local (tvcharts) — a TradingView-style charting app in Python
 
 An open-source, self-hosted charting application inspired by TradingView.
 Candlestick charts with configurable technical indicators (Bollinger Bands,
@@ -46,6 +46,10 @@ container it binds `0.0.0.0:8050` by default; change the published port with
 ## Features
 
 - **Candlestick chart** with pan, scroll-zoom, crosshair and unified hover — dark TradingView-style theme
+- **Zoom-adaptive time axis**: labels shift from years → month+year → week/day → intraday times as you zoom in
+- **Symbol dropdown** with the top 100 pairs (live by 24h volume on Binance, curated lists elsewhere) — free typing still works for any symbol
+- **Watchlist panel** on the right: pin any pair, see Last / Chg / Chg% at a glance (auto-refreshing), click a row to load it on the chart; persists across restarts in the browser
+- **Start date picker** to anchor the chart's history
 - **Overlay indicators** on the price pane:
   - Simple Moving Average (SMA)
   - Exponential Moving Average (EMA)
@@ -60,7 +64,7 @@ container it binds `0.0.0.0:8050` by default; change the published port with
 - **Editable indicator parameters** (lengths, standard deviations, MACD fast/slow/signal)
 - **Volume pane** colored by candle direction
 - **Multiple data sources**: crypto (Binance), stocks/ETFs/forex/indices (Yahoo Finance), plus an offline sample generator
-- **Timeframes**: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w
+- **Timeframes**: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1M
 - **Auto-refresh** every 30 seconds
 - Graceful fallback: if a data source is unreachable, the app shows offline sample data with a warning instead of a blank screen
 
