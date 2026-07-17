@@ -51,6 +51,33 @@ def test_short_history_handled():
     assert rows[0]["status"] == "WAIT"
 
 
+def test_start_end_date_gate_the_period(df):
+    full = dcai.run(df)
+    mid = str(df.index[len(df) // 2].date())
+    late_start = dcai.run(df, start_date=mid)
+    early_end = dcai.run(df, end_date=mid)
+    # benchmark invests one budget per month, so a shorter period = less
+    assert late_start["monthly_invested"] < full["monthly_invested"]
+    assert early_end["monthly_invested"] < full["monthly_invested"]
+    # no buy signal may fall outside the active period
+    start_ts = df.index[len(df) // 2]
+    assert all(s["time"] >= start_ts for s in late_start["signals"])
+    assert all(s["time"] <= start_ts for s in early_end["signals"])
+
+
+def test_default_params_match_pine_dialog():
+    p = dcai.PARAMS
+    assert p["budget"]["default"] == 300.0
+    assert p["start_date"]["default"] == "2026-02-01"
+    assert p["end_date"]["default"] == "2099-12-31"
+    assert p["auto_rho"]["default"] is True
+    assert p["smart_cap"]["default"] == 3.0
+    assert p["strong_boost"]["default"] == 1.5
+    assert p["max_boost"]["default"] == 2.0
+    assert p["pot_reserve"]["default"] == 0.1
+    assert p["show_pot_debug"]["default"] is False
+
+
 def test_percentrank_matches_definition():
     values = np.array([1.0, 2, 3, 4, 5, 3])
     out = dcai._percentrank(values, length=5)

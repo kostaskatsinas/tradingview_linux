@@ -60,9 +60,14 @@ PARAMS = {
     "asset": {"label": "Asset class", "kind": "select", "default": "crypto",
               "options": [{"label": v["label"], "value": k}
                           for k, v in ASSET_CLASSES.items()]},
-    "budget": {"label": "Monthly budget (€/$)", "kind": "number",
-               "default": 100.0, "min": 1, "step": 1},
-    "auto_rho": {"label": "Auto-optimize Rho", "kind": "bool", "default": True},
+    "budget": {"label": "Base Monthly Budget (€/$)", "kind": "number",
+               "default": 300.0, "min": 1, "step": 1},
+    "start_date": {"label": "Start Date", "kind": "date",
+                   "default": "2026-02-01"},
+    "end_date": {"label": "End Date", "kind": "date",
+                 "default": "2099-12-31"},
+    "auto_rho": {"label": "Auto-Optimize Parameters", "kind": "bool",
+                 "default": True},
     "manual_rho": {"label": "Manual sensitivity (Rho)", "kind": "number",
                    "default": 2.0, "min": 0.5, "max": 10, "step": 0.5},
     "smart_cap": {"label": "Max multiplier cap (x)", "kind": "number",
@@ -71,8 +76,10 @@ PARAMS = {
                      "default": 1.5, "min": 1, "step": 0.1},
     "max_boost": {"label": "MAX buy boost (x)", "kind": "number",
                   "default": 2.0, "min": 1, "step": 0.1},
-    "pot_reserve": {"label": "Pot reserve (0-0.5)", "kind": "number",
+    "pot_reserve": {"label": "Pot Reserve (%)", "kind": "number",
                     "default": 0.1, "min": 0, "max": 0.5, "step": 0.05},
+    "show_pot_debug": {"label": "Show Savings Pot Usage", "kind": "bool",
+                       "default": False},
     "knn_neighbors": {"label": "KNN neighbors", "kind": "number",
                       "default": 5, "min": 1, "max": 100, "step": 1},
     "knn_history": {"label": "KNN history lookback", "kind": "number",
@@ -181,6 +188,16 @@ def run(df: pd.DataFrame, **p) -> dict:
     kijun_len = int(p.get("kijun_len", 26))
     mfi_len = int(p.get("mfi_len", 14))
 
+    def _ts(value):
+        if not value:
+            return None
+        return pd.Timestamp(value, tz="UTC")
+
+    start_ts = _ts(p.get("start_date")) or df.index[0]
+    end_ts = _ts(p.get("end_date")) or df.index[-1]
+    # first bar inside the active period (for the price history window)
+    start_pos = int(df.index.searchsorted(start_ts))
+
     n = len(df)
     close = df["close"].to_numpy(dtype=float)
     low = df["low"].to_numpy(dtype=float)
@@ -279,17 +296,19 @@ def run(df: pd.DataFrame, **p) -> dict:
     for t in range(n):
         month_id = int(months[t])
         is_new_month = t > 0 and months[t] != months[t - 1]
+        in_period = start_ts <= df.index[t] <= end_ts
 
         # -- savings pot accrual + passive benchmark on month start -------- #
         if is_new_month:
             prev_id = month_id - 1
             bought_last_month = prev_id in (last_std_m, last_strong_m, last_max_m)
-            if t - 1 >= 0 and not bought_last_month:
+            if df.index[t - 1] >= start_ts and not bought_last_month:
                 savings_pot += budget
-            monthly_invested += budget
-            monthly_units += budget / close[t]
-            if monthly_first_bar is None:
-                monthly_first_bar = t
+            if in_period:
+                monthly_invested += budget
+                monthly_units += budget / close[t]
+                if monthly_first_bar is None:
+                    monthly_first_bar = t
 
         # -- KNN prediction ------------------------------------------------- #
         prob = 0.0
@@ -382,7 +401,8 @@ def run(df: pd.DataFrame, **p) -> dict:
                                  and is_cvd_bullish[t] and not signal_flipped
                                  and (t - last_strong_buy_bar > sb_cooldown))
 
-        if (base_strong_condition and kernel_ok and not already_strong
+        if (base_strong_condition and kernel_ok and in_period
+                and not already_strong
                 and strong_allowed and not np.isnan(kijun[t])
                 and close[t] <= kijun[t]):
             if is_max_zone:
@@ -394,7 +414,8 @@ def run(df: pd.DataFrame, **p) -> dict:
                 last_strong_m = month_id
                 last_strong_buy_bar = t
 
-        if (not already_pullback and is_pullback_zone and prob >= dca_ml_thresh
+        if (in_period and not already_pullback and is_pullback_zone
+                and prob >= dca_ml_thresh
                 and kernel_ok and not trigger_max and not trigger_strong):
             trigger_std = True
             last_std_m = month_id
@@ -413,8 +434,9 @@ def run(df: pd.DataFrame, **p) -> dict:
 
         recommended = 0.0
         if trigger_max or trigger_strong or trigger_std:
-            # inverse-price weighted smart amount over recent price history
-            hist = close[max(0, t - knn_history + 1):t]  # prices before now
+            # inverse-price weighted smart amount over the price history
+            # collected since the start date (capped, includes current bar)
+            hist = close[max(start_pos, t + 1 - knn_history):t + 1]
             raw_smart = budget
             if len(hist) and close[t] > 0:
                 inv = np.power(1.0 / hist[hist > 0], rho)
@@ -433,7 +455,8 @@ def run(df: pd.DataFrame, **p) -> dict:
             recommended = min(desired + bonus, available_capital)
             if recommended > 0:
                 from_salary = min(recommended, monthly_salary)
-                savings_pot -= (recommended - from_salary)
+                from_pot = recommended - from_salary
+                savings_pot -= from_pot
                 smart_invested += recommended
                 smart_units += recommended / close[t]
                 if smart_first_bar is None:
@@ -444,21 +467,24 @@ def run(df: pd.DataFrame, **p) -> dict:
                     "tier": ("fear" if trigger_max else
                              "oversold" if trigger_strong else "pullback"),
                     "amount": recommended,
+                    "pot_used": from_pot,
                     "low": float(low[t]),
+                    "high": float(high[t]),
                 })
 
-        # -- returns tracking (time-weighted) -------------------------------- #
-        s_eq = smart_units * close[t]
-        if smart_prev_eq > 0:
-            smart_returns.append((s_eq - recommended - smart_prev_eq)
-                                 / smart_prev_eq)
-        smart_prev_eq = s_eq
-        m_eq = monthly_units * close[t]
-        if monthly_prev_eq > 0:
-            cash_flow = budget if is_new_month else 0.0
-            monthly_returns.append((m_eq - cash_flow - monthly_prev_eq)
-                                   / monthly_prev_eq)
-        monthly_prev_eq = m_eq
+        # -- returns tracking (time-weighted, active period only) ------------ #
+        if in_period:
+            s_eq = smart_units * close[t]
+            if smart_prev_eq > 0:
+                smart_returns.append((s_eq - recommended - smart_prev_eq)
+                                     / smart_prev_eq)
+            smart_prev_eq = s_eq
+            m_eq = monthly_units * close[t]
+            if monthly_prev_eq > 0:
+                cash_flow = budget if is_new_month else 0.0
+                monthly_returns.append((m_eq - cash_flow - monthly_prev_eq)
+                                       / monthly_prev_eq)
+            monthly_prev_eq = m_eq
 
         # -- drawdown tracking (equity incl. pot) ----------------------------- #
         cur_smart_eq = smart_units * close[t] + savings_pot
@@ -567,19 +593,29 @@ TIER_STYLE = {
 
 def get_signals(symbol: str | None = None, df: pd.DataFrame | None = None,
                 **params) -> list[dict]:
-    """Executed buys, styled for chart flags: time/low/text/color."""
+    """Executed buys, styled for chart flags: time/side/y/text/color."""
     if df is None or len(df) < 60:
         return []
     result = run_cached(symbol or "?", df, **params)
+    show_pot = bool(params.get("show_pot_debug", False))
     out = []
     for sig in result["signals"]:
         style = TIER_STYLE[sig["tier"]]
         out.append({
             "time": sig["time"],
-            "low": sig["low"],
+            "side": "below",
+            "y": sig["low"],
             "text": f"{style['label']}<br>€{sig['amount']:,.0f}",
             "color": style["color"],
         })
+        if show_pot and sig.get("pot_used", 0.0) >= 1:
+            out.append({
+                "time": sig["time"],
+                "side": "above",
+                "y": sig["high"],
+                "text": f"POT<br>€{sig['pot_used']:,.0f}",
+                "color": ORANGE,
+            })
     return out
 
 

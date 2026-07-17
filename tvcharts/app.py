@@ -692,6 +692,19 @@ def _strategy_param_inputs(strategy_key: str) -> list:
                 labelStyle={"color": WHITE, "fontWeight": "600",
                             "fontSize": "12px"},
                 style={"marginBottom": "6px"}))
+        elif kind == "date":
+            # date pickers expose a `date` prop, so they use their own
+            # pattern id type ("sdate") and are collected separately
+            rows.append(html.Div(
+                [html.Span(cfg["label"], style={"fontSize": "12px",
+                                                "color": WHITE,
+                                                "fontWeight": "600"}),
+                 html.Div(dcc.DatePickerSingle(
+                     id={"type": "sdate", "param": name},
+                     date=cfg["default"], clearable=True,
+                     display_format="YYYY-MM-DD"),
+                     style={"marginTop": "2px"})],
+                style={"marginBottom": "8px"}))
         else:
             rows.append(html.Div(
                 [html.Span(cfg["label"],
@@ -711,7 +724,8 @@ def _strategy_param_inputs(strategy_key: str) -> list:
     return rows
 
 
-def _collect_strategy_params(strategy_key: str, param_ids, param_values) -> dict:
+def _collect_strategy_params(strategy_key: str, param_ids, param_values,
+                             date_ids=None, date_values=None) -> dict:
     spec = get_strategy_params(strategy_key)
     out = {}
     for ident, value in zip(param_ids or [], param_values or []):
@@ -725,6 +739,10 @@ def _collect_strategy_params(strategy_key: str, param_ids, param_values) -> dict
             out[name] = cfg["default"]
         else:
             out[name] = value
+    for ident, value in zip(date_ids or [], date_values or []):
+        name = ident.get("param")
+        if name in spec and spec[name].get("kind") == "date":
+            out[name] = value  # None = cleared = unbounded
     # fill anything the UI didn't provide (e.g. before first render)
     for name, cfg in spec.items():
         out.setdefault(name, cfg["default"])
@@ -1009,13 +1027,16 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
             if first <= sig["time"] <= last:
                 # Anchor to the chart's own candle so the flag sits on the bar
                 # even if the strategy ran on a longer history.
+                side = sig.get("side", "below")
+                col = "low" if side == "below" else "high"
                 try:
-                    y_low = float(df.loc[sig["time"], "low"])
+                    y_anchor = float(df.loc[sig["time"], col])
                 except KeyError:
-                    y_low = sig["low"]
+                    y_anchor = sig.get("y", sig.get("low"))
                 fig.add_annotation(
-                    x=sig["time"], y=y_low, text=sig["text"],
-                    showarrow=True, ax=0, ay=42, arrowhead=2, arrowwidth=1.5,
+                    x=sig["time"], y=y_anchor, text=sig["text"],
+                    showarrow=True, ax=0, ay=42 if side == "below" else -42,
+                    arrowhead=2, arrowwidth=1.5,
                     arrowcolor=sig["color"], bgcolor=sig["color"],
                     font=dict(color="#ffffff", size=10), opacity=0.9,
                     borderpad=3, row=1, col=1,
@@ -1096,14 +1117,17 @@ def create_app() -> dash.Dash:
                   Input("provider", "value"),
                   Input("refresh", "n_intervals"),
                   Input({"type": "sparam", "param": ALL}, "value"),
-                  State({"type": "sparam", "param": ALL}, "id"))
+                  Input({"type": "sdate", "param": ALL}, "date"),
+                  State({"type": "sparam", "param": ALL}, "id"),
+                  State({"type": "sdate", "param": ALL}, "id"))
     def render_strategy(strategy_key, symbol, provider_name, _tick,
-                        sparam_values, sparam_ids):
+                        sparam_values, sdate_values, sparam_ids, sdate_ids):
         symbol = (symbol or "").strip().upper()
         if not symbol:
             return []
         params = _collect_strategy_params(strategy_key, sparam_ids,
-                                          sparam_values)
+                                          sparam_values, sdate_ids,
+                                          sdate_values)
         return _strategy_rows(strategy_key, symbol, provider_name, params)
 
     @app.callback(
@@ -1120,12 +1144,14 @@ def create_app() -> dash.Dash:
         Input("refresh", "n_intervals"),
         Input("strategy-select", "value"),
         Input({"type": "sparam", "param": ALL}, "value"),
+        Input({"type": "sdate", "param": ALL}, "date"),
         State({"type": "param", "indicator": dash.ALL, "param": dash.ALL}, "id"),
         State({"type": "sparam", "param": ALL}, "id"),
+        State({"type": "sdate", "param": ALL}, "id"),
     )
     def update_chart(provider_name, symbol, interval, limit, start_date, active,
                      panes, param_values, _tick, strategy_key, sparam_values,
-                     param_ids, sparam_ids):
+                     sdate_values, param_ids, sparam_ids, sdate_ids):
         symbol = (symbol or "").strip().upper()
         if not symbol:
             return _empty_fig(), "Enter a symbol."
@@ -1155,7 +1181,8 @@ def create_app() -> dash.Dash:
         signals = []
         if interval == "1d":  # strategy flags only make sense on daily bars
             sparams = _collect_strategy_params(strategy_key, sparam_ids,
-                                               sparam_values)
+                                               sparam_values, sdate_ids,
+                                               sdate_values)
             signals = _strategy_signals(strategy_key, symbol, provider_name,
                                         sparams)
         fig = build_figure(df, symbol, active or [], params,
