@@ -140,8 +140,3 @@ the app is ever distributed or hosted as a service with DCAi included, AGPL
 requires offering the source. Never strip the attribution to Salih Emin /
 Cerebrux.
 
-## Origin note
-
-The repo's pre-session README/FAQ advertised a "cracked TradingView Premium"
-Windows download (malware-distribution pattern). Those files were removed and
-replaced with this real app. Do not restore that content.
