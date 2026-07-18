@@ -641,7 +641,7 @@ def build_layout() -> html.Div:
             html.Div(id="notify-list", style={"marginTop": "8px"}),
             html.Div(id="notify-feed", style={"display": "none"},
                      **{"data-id": "", "data-msg": ""}),
-            dcc.Interval(id="refresh", interval=30_000, n_intervals=0),
+            dcc.Interval(id="refresh", interval=60_000, n_intervals=0),
         ],
         id="sidebar",
         style={"width": "260px", "minWidth": "260px", "background": PANEL,
@@ -1515,15 +1515,19 @@ def create_app() -> dash.Dash:
                   Input("interval", "value"),
                   Input("watchlist-v2", "data"))
     def manage_stream(provider_name, symbol, interval, watchlist):
-        """Subscribe the WebSocket to the charted + watchlist symbols, and
-        poll faster when a live stream is feeding the UI."""
+        """Keep the WebSocket subscribed to the charted + watchlist symbols.
+
+        The chart repaints on a fixed 1-minute cadence; the live stream keeps
+        the server-side snapshot fresh in between so each repaint shows the
+        latest price.
+        """
         symbol = (symbol or "").strip().upper()
         if provider_name == "binance":
             chart = (symbol, interval) if symbol else None
             STREAM.set_subscriptions(chart, list(watchlist or []))
-            return 5_000  # live: refresh every 5s
-        STREAM.set_subscriptions(None, [])
-        return 30_000  # polling only
+        else:
+            STREAM.set_subscriptions(None, [])
+        return 60_000  # refresh every 1 minute
 
     @app.callback(Output("strategy-body", "children"),
                   Input("strategy-select", "value"),

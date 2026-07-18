@@ -55,7 +55,7 @@ container it binds `0.0.0.0:8050` by default; change the published port with
   - **Custom** — implement `get_stats()` in `tvcharts/strategy.py` to display your own stats (label / value / status rows, colors supported)
 - **Drag-to-resize panels**: grab the divider between sidebar/chart, chart/watchlist, or watchlist/strategy and drag
 - **Drag-to-resize chart panes**: drag the strip between the price, volume and oscillator panes to change their heights; the layout persists across refreshes (per pane count, in the browser)
-- **Zoom survives auto-refresh**: pan/zoom state is kept across the 30s data refresh and only resets when the symbol or pane structure changes
+- **Zoom survives auto-refresh**: pan/zoom state is kept across the data refresh and only resets when the symbol or pane structure changes
 - **Crosshair** with a vertical dotted tracking line, plus a fixed TradingView-style readout above the chart showing the hovered bar's OHLC and indicator values (no floating box covering the candles)
 - **Strategy buy flags on the chart** (1d interval): DCAi's executed buys appear as PULLBACK / OVERSOLD / FEAR labels with amounts on the price pane, sharing one cached simulation with the strategy panel
 - **Equity-curve pane & trade export**: overlay DCAi vs blind-DCA equity and deployed capital, draw the average-entry line, and download the executed buys as CSV
@@ -77,7 +77,7 @@ container it binds `0.0.0.0:8050` by default; change the published port with
 - **Volume pane** colored by candle direction
 - **Multiple data sources**: crypto (Binance), stocks/ETFs/forex/indices (Yahoo Finance), plus an offline sample generator
 - **Timeframes**: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1M
-- **Live updates** (Binance): the charted candle and watchlist prices stream in real time over Binance's public WebSocket, with the refresh cadence dropping to ~5s; falls back to 30s polling for other sources or if the stream is unavailable
+- **Live updates** (Binance): the charted candle and watchlist prices stream in real time over Binance's public WebSocket, keeping the data fresh between the 1-minute chart repaints; other sources are polled on the same 1-minute cadence
 - Graceful fallback: if a data source is unreachable, the app shows offline sample data with a warning instead of a blank screen
 
 ---
