@@ -13,6 +13,8 @@ import plotly.graph_objects as go
 from dash import ALL, Input, Output, State, ctx, dcc, html
 from plotly.subplots import make_subplots
 
+from .alerts import CONDITIONS as ALERT_CONDITIONS
+from .alerts import ENGINE as ALERT_ENGINE
 from .indicators import INDICATOR_REGISTRY
 from .indicators import heikin_ashi as ind_heikin_ashi
 from .providers import BinanceProvider, INTERVALS, ProviderError, get_provider
@@ -215,7 +217,7 @@ INDEX_STRING = """<!DOCTYPE html>
             }
             function paneAxes(gd) {
                 return Object.keys(gd._fullLayout)
-                    .filter(function (k) { return /^yaxis\d*$/.test(k); })
+                    .filter(function (k) { return /^yaxis\\d*$/.test(k); })
                     .filter(function (k) {
                         var ax = gd._fullLayout[k];
                         return ax && ax.domain && ax.domain.length === 2;
@@ -417,6 +419,38 @@ INDEX_STRING = """<!DOCTYPE html>
             else document.addEventListener("DOMContentLoaded", hook);
         })();
         </script>
+        <script>
+        /* Desktop notifications: the server writes the latest notification's
+           id + text into #notify-feed (a hidden div refreshed by an interval
+           callback). When the id changes, fire a browser Notification. */
+        (function () {
+            var lastId = null;
+            var asked = false;
+            function poll() {
+                var feed = document.getElementById("notify-feed");
+                if (feed && "Notification" in window) {
+                    if (!asked) {
+                        asked = true;
+                        if (Notification.permission === "default") {
+                            Notification.requestPermission();
+                        }
+                    }
+                    var id = feed.getAttribute("data-id");
+                    var msg = feed.getAttribute("data-msg");
+                    if (id && id !== lastId) {
+                        if (lastId !== null &&
+                            Notification.permission === "granted" && msg) {
+                            new Notification("TradingView Local", {body: msg});
+                        }
+                        lastId = id;
+                    }
+                }
+                setTimeout(poll, 3000);
+            }
+            if (document.readyState !== "loading") poll();
+            else document.addEventListener("DOMContentLoaded", poll);
+        })();
+        </script>
     </body>
 </html>"""
 
@@ -568,6 +602,44 @@ def build_layout() -> html.Div:
                  html.Div(id="strategy-params")],
                 open=False,
             ),
+            html.Div(style={"height": "16px"}),
+            _control_label("Alerts"),
+            html.Div(
+                [
+                    dcc.Dropdown(
+                        id="alert-condition",
+                        options=[{"label": v, "value": k}
+                                 for k, v in ALERT_CONDITIONS.items()],
+                        value="price_above", clearable=False,
+                        className="dark-dropdown",
+                        style={"marginTop": "6px"}),
+                    html.Div(
+                        [dcc.Input(id="alert-level", type="number",
+                                   placeholder="Level",
+                                   style={"flex": "1", "background": BG,
+                                          "color": WHITE,
+                                          "border": f"1px solid {GRID}",
+                                          "borderRadius": "4px",
+                                          "padding": "5px 8px",
+                                          "fontWeight": "600",
+                                          "minWidth": "0"}),
+                         html.Button("Add", id="alert-add", n_clicks=0,
+                                     style={"background": ACCENT,
+                                            "color": WHITE, "border": "none",
+                                            "borderRadius": "4px",
+                                            "padding": "5px 12px",
+                                            "cursor": "pointer",
+                                            "fontWeight": "600"})],
+                        style={"display": "flex", "gap": "6px",
+                               "marginTop": "6px"}),
+                    html.Div(id="alert-hint",
+                             style={"fontSize": "11px", "color": "#787b86",
+                                    "marginTop": "4px"}),
+                ]),
+            html.Div(id="alert-list", style={"marginTop": "8px"}),
+            html.Div(id="notify-list", style={"marginTop": "8px"}),
+            html.Div(id="notify-feed", style={"display": "none"},
+                     **{"data-id": "", "data-msg": ""}),
             dcc.Interval(id="refresh", interval=30_000, n_intervals=0),
         ],
         id="sidebar",
@@ -1226,10 +1298,59 @@ def build_figure(df, symbol: str, active: list[str], params: dict,
     return fig
 
 
+def _alert_rows(alerts: list[dict]) -> list:
+    """Render the active alerts list with delete buttons."""
+    if not alerts:
+        return [html.Div("No alerts set.",
+                         style={"color": "#787b86", "fontSize": "12px",
+                                "padding": "4px 0"})]
+    rows = []
+    for alert in alerts:
+        cond = ALERT_CONDITIONS.get(alert["condition"], alert["condition"])
+        level = alert.get("level")
+        desc = f"{alert['symbol']} · {cond}"
+        if level is not None:
+            desc += f" {level:,.6g}"
+        fired = " ✓" if alert.get("last_fired") else ""
+        rows.append(html.Div(
+            [html.Span(desc + fired,
+                       style={"flex": "1", "fontSize": "12px",
+                              "color": WHITE, "fontWeight": "600",
+                              "overflow": "hidden",
+                              "textOverflow": "ellipsis",
+                              "whiteSpace": "nowrap"}),
+             html.Span("×", id={"type": "alert-del", "id": alert["id"]},
+                       n_clicks=0, title="Remove",
+                       style={"color": "#787b86", "cursor": "pointer",
+                              "fontWeight": "700", "padding": "0 4px"})],
+            style={"display": "flex", "alignItems": "center",
+                   "gap": "4px", "padding": "3px 0",
+                   "borderBottom": f"1px solid {GRID}"}))
+    return rows
+
+
+def _notification_rows(notifications: list[dict]) -> list:
+    """Render the recent notifications (newest first)."""
+    if not notifications:
+        return []
+    rows = [html.Div("Recent", style={"fontSize": "11px", "color": "#787b86",
+                                      "fontWeight": "700",
+                                      "textTransform": "uppercase",
+                                      "marginTop": "6px"})]
+    for note in reversed(notifications[-10:]):
+        stamp = note["time"][11:16] if len(note["time"]) > 16 else ""
+        rows.append(html.Div(
+            f"{stamp}  {note['message']}",
+            style={"fontSize": "11px", "color": TEXT, "padding": "2px 0",
+                   "lineHeight": "1.4"}))
+    return rows
+
+
 def create_app() -> dash.Dash:
     app = dash.Dash(__name__, title=APP_NAME)
     app.index_string = INDEX_STRING
     app.layout = build_layout()
+    ALERT_ENGINE.start()
 
     @app.callback(Output("symbol", "options"),
                   Input("provider", "value"),
@@ -1449,6 +1570,53 @@ def create_app() -> dash.Dash:
                            chart_type=chart_type or "candles",
                            drawings=(drawings_data or {}).get(symbol) or [])
         return fig, status
+
+    # -- alerts ----------------------------------------------------------- #
+
+    @app.callback(Output("alert-hint", "children"),
+                  Input("alert-condition", "value"))
+    def alert_hint(condition):
+        if condition == "dcai_signal":
+            return "Fires when DCAi triggers a buy on the latest daily bar."
+        return "Fires once when the daily close crosses the level."
+
+    @app.callback(Output("alert-list", "children"),
+                  Input("alert-add", "n_clicks"),
+                  Input({"type": "alert-del", "id": ALL}, "n_clicks"),
+                  Input("refresh", "n_intervals"),
+                  State("alert-condition", "value"),
+                  State("alert-level", "value"),
+                  State("symbol", "value"),
+                  State("provider", "value"))
+    def manage_alerts(_add, _dels, _tick, condition, level, symbol, provider):
+        trigger = ctx.triggered_id
+        if trigger == "alert-add":
+            symbol = (symbol or "").strip().upper()
+            if symbol and (condition == "dcai_signal" or level is not None):
+                ALERT_ENGINE.store.add(symbol, condition,
+                                       None if condition == "dcai_signal"
+                                       else float(level),
+                                       provider=provider or "binance")
+        elif isinstance(trigger, dict) and trigger.get("type") == "alert-del":
+            if ctx.triggered and ctx.triggered[0]["value"]:
+                ALERT_ENGINE.store.remove(trigger["id"])
+        return _alert_rows(ALERT_ENGINE.store.load())
+
+    @app.callback(Output("notify-list", "children"),
+                  Output("notify-feed", "data-id"),
+                  Output("notify-feed", "data-msg"),
+                  Input("refresh", "n_intervals"))
+    def poll_notifications(_tick):
+        # Evaluate alerts on the same cadence as the UI refresh (in addition
+        # to the background thread) so notifications appear promptly even if
+        # the thread's slower loop hasn't come round yet.
+        ALERT_ENGINE.run_once()
+        notes = list(ALERT_ENGINE.notifications)
+        rows = _notification_rows(notes)
+        if notes:
+            latest = notes[-1]
+            return rows, latest["time"], latest["message"]
+        return rows, "", ""
 
     return app
 

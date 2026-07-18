@@ -8,4 +8,14 @@ services:
     environment:
       # Change the internal port if needed (also update the mapping above)
       TVCHARTS_PORT: "8050"
+      # Optional: deliver alert notifications to Telegram. Create a bot with
+      # @BotFather for the token, and get your chat id from @userinfobot.
+      # TELEGRAM_BOT_TOKEN: "123456:ABC-DEF..."
+      # TELEGRAM_CHAT_ID: "987654321"
+    # Persist alerts across container restarts (stored in ~/.tvcharts).
+    volumes:
+      - tvcharts-data:/home/appuser/.tvcharts
     restart: unless-stopped
+
+volumes:
+  tvcharts-data:

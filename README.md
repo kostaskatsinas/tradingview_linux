@@ -58,6 +58,9 @@ container it binds `0.0.0.0:8050` by default; change the published port with
 - **Zoom survives auto-refresh**: pan/zoom state is kept across the 30s data refresh and only resets when the symbol or pane structure changes
 - **Crosshair** with a vertical dotted tracking line, plus a fixed TradingView-style readout above the chart showing the hovered bar's OHLC and indicator values (no floating box covering the candles)
 - **Strategy buy flags on the chart** (1d interval): DCAi's executed buys appear as PULLBACK / OVERSOLD / FEAR labels with amounts on the price pane, sharing one cached simulation with the strategy panel
+- **Equity-curve pane & trade export**: overlay DCAi vs blind-DCA equity and deployed capital, draw the average-entry line, and download the executed buys as CSV
+- **Chart types & drawing tools**: Candles / Heikin Ashi / Line / OHLC bars; draw trend lines, rectangles and horizontal levels (persisted per symbol in the browser); Ichimoku Cloud, Supertrend, ADX and OBV indicators
+- **Alerts & notifications**: set price-cross alerts or a DCAi buy-signal alert; get notified in-app, via desktop notifications, and — when `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` are set — on Telegram. Alerts persist server-side in `~/.tvcharts/alerts.json`
 - **Start date picker** to anchor the chart's history
 - **Overlay indicators** on the price pane:
   - Simple Moving Average (SMA)
