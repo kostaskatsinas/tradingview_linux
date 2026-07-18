@@ -19,6 +19,7 @@ from .indicators import INDICATOR_REGISTRY
 from .indicators import heikin_ashi as ind_heikin_ashi
 from .providers import BinanceProvider, INTERVALS, ProviderError, get_provider
 from .strategies import STRATEGIES, get_strategy_params
+from .stream import MANAGER as STREAM
 
 APP_NAME = "TradingView Local"
 
@@ -911,17 +912,47 @@ def _fetch_quote(provider_name: str, sym: str):
             return None
 
 
+def _merge_live_bar(df, symbol: str, interval: str):
+    """Overlay the still-forming candle from the WebSocket onto ``df``.
+
+    Replaces the last row when the live bar shares its open time, or appends
+    a new row when a fresh bar has started. Returns ``df`` unchanged when no
+    live bar is available (offline, no stream, or non-Binance).
+    """
+    bar = STREAM.get_bar(symbol, interval)
+    if bar is None:
+        return df
+    ts = pd.to_datetime(bar["start"], unit="ms", utc=True)
+    if df.index.tz is None:
+        ts = ts.tz_localize(None)
+    row = {"open": bar["open"], "high": bar["high"], "low": bar["low"],
+           "close": bar["close"], "volume": bar["volume"]}
+    df = df.copy()
+    if len(df) and ts <= df.index[-1]:
+        if ts == df.index[-1]:
+            df.loc[df.index[-1], list(row)] = list(row.values())
+        return df  # older than our last bar: ignore
+    df.loc[ts] = [row.get(c, float("nan")) for c in df.columns]
+    return df
+
+
 def _watchlist_rows(symbols: list[str], provider_name: str) -> list:
     rows = []
     # Fetch all quotes concurrently — one slow/unreachable symbol must not
     # stall the whole panel.
     with ThreadPoolExecutor(max_workers=8) as pool:
         frames = list(pool.map(lambda s: _fetch_quote(provider_name, s), symbols))
+    live = provider_name == "binance"
     for sym, df in zip(symbols, frames):
         last = chg = pct = None
         if df is not None and len(df) >= 2:
             last = float(df["close"].iloc[-1])
             prev = float(df["close"].iloc[-2])
+            # prefer the live stream's last price; keep the previous daily
+            # close as the change basis so the % stays consistent with REST
+            ticker = STREAM.get_ticker(sym) if live else None
+            if ticker is not None:
+                last = ticker["last"]
             chg = last - prev
             pct = 100.0 * chg / prev if prev else 0.0
         color = TEXT if chg is None else (UP if chg >= 0 else DOWN)
@@ -1478,6 +1509,22 @@ def create_app() -> dash.Dash:
         return dcc.send_data_frame(trades.to_csv,
                                    f"dcai_trades_{symbol}.csv", index=False)
 
+    @app.callback(Output("refresh", "interval"),
+                  Input("provider", "value"),
+                  Input("symbol", "value"),
+                  Input("interval", "value"),
+                  Input("watchlist-v2", "data"))
+    def manage_stream(provider_name, symbol, interval, watchlist):
+        """Subscribe the WebSocket to the charted + watchlist symbols, and
+        poll faster when a live stream is feeding the UI."""
+        symbol = (symbol or "").strip().upper()
+        if provider_name == "binance":
+            chart = (symbol, interval) if symbol else None
+            STREAM.set_subscriptions(chart, list(watchlist or []))
+            return 5_000  # live: refresh every 5s
+        STREAM.set_subscriptions(None, [])
+        return 30_000  # polling only
+
     @app.callback(Output("strategy-body", "children"),
                   Input("strategy-select", "value"),
                   Input("symbol", "value"),
@@ -1550,6 +1597,8 @@ def create_app() -> dash.Dash:
                 f"{start.date() if start is not None else 'start'} — try an "
                 "earlier start date or a larger interval."
             )
+        if provider_name == "binance":
+            df = _merge_live_bar(df, symbol, interval)
         signals = []
         equity = None
         display = set(strategy_display or [])

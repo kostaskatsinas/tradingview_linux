@@ -77,7 +77,7 @@ container it binds `0.0.0.0:8050` by default; change the published port with
 - **Volume pane** colored by candle direction
 - **Multiple data sources**: crypto (Binance), stocks/ETFs/forex/indices (Yahoo Finance), plus an offline sample generator
 - **Timeframes**: 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1M
-- **Auto-refresh** every 30 seconds
+- **Live updates** (Binance): the charted candle and watchlist prices stream in real time over Binance's public WebSocket, with the refresh cadence dropping to ~5s; falls back to 30s polling for other sources or if the stream is unavailable
 - Graceful fallback: if a data source is unreachable, the app shows offline sample data with a warning instead of a blank screen
 
 ---
